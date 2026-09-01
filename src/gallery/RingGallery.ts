@@ -41,6 +41,8 @@ const AUTO_SPEEDS = [0.04, 0.08, 0.14, 0.24, 0.38, 0.55, 0.75, 1.0];
 const ZOOM_IN = 0.8;
 const ZOOM_OUT = 0.64;
 const MOTION_EASE = "power2.inOut";
+/** easings.net easeInOutQuart — select / zoom in and out. */
+const FOCUS_EASE = "quart.inOut";
 const AXIS_LOCK = 10;
 const FLOOR_DRAG = 72;
 
@@ -620,7 +622,7 @@ export class RingGallery {
           flatten,
           saturation: 1,
           duration,
-          ease: MOTION_EASE,
+          ease: FOCUS_EASE,
           overwrite: "auto",
           onUpdate: () => this.applyPanelPresentation(panel, floor),
           onComplete: () => this.applyPanelPresentation(panel, floor),
@@ -674,7 +676,7 @@ export class RingGallery {
       gsap.to(floor, {
         spin: facing,
         duration,
-        ease: MOTION_EASE,
+        ease: focus ? FOCUS_EASE : MOTION_EASE,
         overwrite: "auto",
         onComplete: () => {
           this.aligning = false;
@@ -686,7 +688,7 @@ export class RingGallery {
       gsap.to(this, {
         focusT: 1,
         duration,
-        ease: MOTION_EASE,
+        ease: FOCUS_EASE,
         overwrite: "auto",
       });
     }
@@ -698,7 +700,7 @@ export class RingGallery {
     gsap.to(this, {
       focusT: 0,
       duration: this.motionDuration(ZOOM_OUT),
-      ease: MOTION_EASE,
+      ease: FOCUS_EASE,
       overwrite: "auto",
     });
     this.applyFocusPresentation();
