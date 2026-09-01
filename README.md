@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-Pick a ratio (16:9, 1:1, or 9:16), add one or more JPG / AVIF / GIF / MP4 files, tweak the lens. Press `F` to toggle a chrome-free preview (`Esc` also exits).
+Pick a ratio (16:9, 1:1, or 9:16), add one or more JPG / AVIF / GIF / MP4 files, tweak the lens. Press `F` for a chrome-free preview. `Esc` leaves a focused image, or exits preview if you are already zoomed out.
 
 ## Embed
 
@@ -41,4 +41,4 @@ const { destroy } = mountGallery("#gallery", {
 });
 ```
 
-Max 24 frames. Drag or scroll to spin the ring.
+Max 24 frames. Click a frame to enter it. Swipe or arrow keys step one image; scroll spins the ring. Keys `1` `2` `3` change floors.

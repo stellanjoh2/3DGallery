@@ -40,6 +40,8 @@ const WHEEL_MAX = 0.72;
 const AUTO_SPEEDS = [0.04, 0.08, 0.14, 0.24, 0.38, 0.55, 0.75, 1.0];
 const ZOOM_IN = 1.2;
 const ZOOM_OUT = 0.96;
+/** Tilt, unflatten, and fisheye finish before the camera dolly does. */
+const WORLD_OUT = 0.52;
 
 gsap.registerPlugin(CustomEase);
 
@@ -105,6 +107,7 @@ export class RingGallery {
   private keySpin = 0;
   private keyHoldTimer = 0;
   private focusT = 0;
+  private worldT = 0;
   private floorY = 0;
   private focusPoint = new Vector3(0, 0, -3.3);
   private homePos = new Vector3(0, HOME_Y, 0);
@@ -117,12 +120,15 @@ export class RingGallery {
   private dragAxis: "x" | "y" | null = null;
   private lastX = 0;
   private lastY = 0;
+  private hoverX = 0;
+  private hoverY = 0;
   private dragStartX = 0;
   private dragStartY = 0;
   private dragY = 0;
   private dragFromFocus = false;
   private dragCommitted = false;
   private pendingFloor = -1;
+  private pendingIndex = -1;
   private dragVx = 0;
   private lastDragT = 0;
   private lastT = 0;
@@ -221,6 +227,14 @@ export class RingGallery {
 
   setActiveRing(index: number): void {
     if (index < 0 || index >= this.floors.length || index === this.activeRing) return;
+    if (this.selectedIndex >= 0 || this.focusT > 0.001) {
+      if (this.selectedIndex >= 0) {
+        this.selectedIndex = -1;
+        this.blurFocus();
+      }
+      this.queueFloor(index);
+      return;
+    }
     this.goToFloor(index);
   }
 
@@ -260,7 +274,17 @@ export class RingGallery {
   }
 
   setSelectedIndex(index: number, ring = this.activeRing): void {
-    if (ring !== this.activeRing) this.goToFloor(ring);
+    if (ring !== this.activeRing) {
+      if (index < 0 && (this.selectedIndex >= 0 || this.focusT > 0.001)) {
+        if (this.selectedIndex >= 0) {
+          this.selectedIndex = -1;
+          this.blurFocus();
+        }
+        this.queueFloor(ring);
+        return;
+      }
+      this.goToFloor(ring, index < 0);
+    }
     if (index === this.selectedIndex) return;
     this.selectedIndex = index;
     if (index < 0) this.blurFocus();
@@ -342,7 +366,7 @@ export class RingGallery {
     this.floorY = y;
   }
 
-  private goToFloor(index: number): void {
+  private goToFloor(index: number, face = true): void {
     if (index < 0 || index >= this.floors.length) return;
     this.releaseSpin();
     this.activeRing = index;
@@ -363,6 +387,10 @@ export class RingGallery {
       ease: MOTION_EASE,
       overwrite: "auto",
     });
+    if (face) {
+      const front = this.frontIndex();
+      if (front >= 0) this.faceIndex(front, false);
+    }
   }
 
   private setFloorItems(floor: Floor, items: GalleryItem[]): void {
@@ -563,7 +591,7 @@ export class RingGallery {
   }
 
   private applyView(): void {
-    const t = this.focusT;
+    const t = this.worldT;
     const axisX = this.settings.axisTilt * (1 - t);
     const axisZ = this.settings.ringTilt * (1 - t);
     this.axis.rotation.x = (axisX * Math.PI) / 180;
@@ -603,6 +631,8 @@ export class RingGallery {
     const t = this.focusT;
     this.homePos.set(0, HOME_Y * (1 - t) + this.floorY, 0);
     this.homeLook.set(0, this.floorY, -1);
+    this.axis.localToWorld(this.homePos);
+    this.axis.localToWorld(this.homeLook);
     if (this.focusT > 0.001) {
       const floor = this.active();
       this.focusPoint.set(0, floor.group.position.y, -floor.radius);
@@ -643,7 +673,9 @@ export class RingGallery {
   }
 
   private applyFocusPresentation(): void {
-    const duration = this.motionDuration(this.selectedIndex >= 0 ? ZOOM_IN : ZOOM_OUT);
+    const focusing = this.selectedIndex >= 0;
+    const duration = this.motionDuration(focusing ? ZOOM_IN : WORLD_OUT);
+    const ease = focusing ? FOCUS_EASE : MOTION_EASE;
     const active = this.active();
 
     for (const floor of this.floors) {
@@ -654,7 +686,7 @@ export class RingGallery {
           flatten,
           saturation: 1,
           duration,
-          ease: FOCUS_EASE,
+          ease,
           overwrite: "auto",
           onUpdate: () => this.applyPanelPresentation(panel, floor),
           onComplete: () => this.applyPanelPresentation(panel, floor),
@@ -670,6 +702,7 @@ export class RingGallery {
 
   private focusIndex(index: number): void {
     this.pendingFloor = -1;
+    this.pendingIndex = -1;
     this.faceIndex(index, true);
     this.applyFocusPresentation();
   }
@@ -720,6 +753,7 @@ export class RingGallery {
     if (focus) {
       gsap.to(this, {
         focusT: 1,
+        worldT: 1,
         duration,
         ease: FOCUS_EASE,
         overwrite: "auto",
@@ -731,35 +765,54 @@ export class RingGallery {
     this.releaseSpin();
     this.active().spinVel = 0;
     gsap.killTweensOf(this, "focusT");
+    gsap.killTweensOf(this, "worldT");
+    const out = this.motionDuration(ZOOM_OUT);
+    const world = this.motionDuration(WORLD_OUT);
     gsap.to(this, {
       focusT: 0,
-      duration: this.motionDuration(ZOOM_OUT),
+      duration: out,
       ease: FOCUS_EASE,
       overwrite: "auto",
       onComplete: () => this.flushPendingFloor(),
     });
+    gsap.to(this, {
+      worldT: 0,
+      duration: world,
+      ease: MOTION_EASE,
+      overwrite: "auto",
+    });
     this.applyFocusPresentation();
+    this.syncCursor();
   }
 
-  private queueFloor(index: number): void {
-    if (index < 0 || index >= this.floors.length || index === this.activeRing) return;
+  private queueFloor(index: number, item = -1): void {
+    if (index < 0 || index >= this.floors.length) return;
+    if (index === this.activeRing && item < 0) return;
     this.pendingFloor = index;
+    this.pendingIndex = item;
     if (this.focusT <= 0.001) this.flushPendingFloor();
   }
 
   private flushPendingFloor(): void {
     const next = this.pendingFloor;
+    const item = this.pendingIndex;
     this.pendingFloor = -1;
-    if (next < 0 || next === this.activeRing || this.selectedIndex >= 0) return;
-    this.choose(-1, next);
+    this.pendingIndex = -1;
+    if (next < 0 || this.selectedIndex >= 0) return;
+    if (next === this.activeRing) {
+      if (item >= 0) this.choose(item, next);
+      return;
+    }
+    this.choose(item, next);
   }
 
   private choose(index: number, ring = this.activeRing): void {
-    if (ring !== this.activeRing) this.goToFloor(ring);
+    if (ring !== this.activeRing) this.goToFloor(ring, index < 0);
     this.selectedIndex = index;
     if (index < 0) this.blurFocus();
     else this.focusIndex(index);
     this.onSelect?.(index, ring);
+    this.syncCursor();
   }
 
   private frontIndex(): number {
@@ -868,6 +921,13 @@ export class RingGallery {
     if (isTypingTarget(event.target)) return;
     if (this.floors.length === 0) return;
 
+    if (event.key === "Escape") {
+      if (this.selectedIndex < 0) return;
+      event.preventDefault();
+      this.choose(-1);
+      return;
+    }
+
     if (event.key === "1" || event.key === "2" || event.key === "3") {
       const floor = Number(event.key) - 1;
       if (floor >= this.floors.length) return;
@@ -955,11 +1015,17 @@ export class RingGallery {
     this.dragStartY = event.clientY;
     this.lastDragT = performance.now();
     this.active().spinVel = 0;
+    this.syncCursor();
     this.renderer.domElement.setPointerCapture(event.pointerId);
   }
 
   private onPointerMove(event: PointerEvent): void {
-    if (!this.dragging) return;
+    this.hoverX = event.clientX;
+    this.hoverY = event.clientY;
+    if (!this.dragging) {
+      this.syncCursor();
+      return;
+    }
     const now = performance.now();
     const dt = Math.max(0.001, (now - this.lastDragT) / 1000);
     const dx = event.clientX - this.lastX;
@@ -1007,16 +1073,17 @@ export class RingGallery {
   }
 
   private dragFloors(dy: number): void {
+    if (this.dragCommitted) return;
     this.dragY += dy;
     const top = this.floors.length - 1;
     if (this.activeRing >= top && this.dragY > 0) this.dragY = 0;
     if (this.activeRing <= 0 && this.dragY < 0) this.dragY = 0;
     if (this.dragY <= -FLOOR_DRAG) {
+      this.dragCommitted = true;
       this.choose(-1, this.activeRing - 1);
-      this.dragY = 0;
     } else if (this.dragY >= FLOOR_DRAG) {
+      this.dragCommitted = true;
       this.choose(-1, this.activeRing + 1);
-      this.dragY = 0;
     }
   }
 
@@ -1030,15 +1097,17 @@ export class RingGallery {
     }
     this.active().spinVel = 0;
     if (!this.moved) {
-      if (this.floors.every((ring) => ring.panels.length === 0)) return;
+      if (this.floors.every((ring) => ring.panels.length === 0)) {
+        this.syncCursor();
+        return;
+      }
       this.pick(event.clientX, event.clientY);
-      return;
-    }
-    if (this.dragFromFocus && this.dragAxis === "y") {
+    } else if (this.dragFromFocus && this.dragAxis === "y") {
       this.commitFocusFloor(event.clientY - this.dragStartY);
-      return;
+    } else if (this.dragAxis === "x") {
+      this.swipeStep(event.clientX);
     }
-    if (this.dragAxis === "x") this.swipeStep(event.clientX);
+    this.syncCursor();
   }
 
   private onWheel(event: WheelEvent): void {
@@ -1059,32 +1128,69 @@ export class RingGallery {
     else if (floor.spinVel < -WHEEL_MAX) floor.spinVel = -WHEEL_MAX;
   }
 
-  private pick(clientX: number, clientY: number): void {
+  private pointerNdc(clientX: number, clientY: number): boolean {
     const rect = this.renderer.domElement.getBoundingClientRect();
-    this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
-    this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-    this.camera.clearViewOffset();
-    this.camera.aspect = Math.max(1, rect.width) / Math.max(1, rect.height);
-    this.camera.updateProjectionMatrix();
-    try {
-      this.raycaster.setFromCamera(this.pointer, this.camera);
-      const meshes = this.floors.flatMap((floor) => floor.panels.map((p) => p.mesh));
-      const hits = this.raycaster.intersectObjects(meshes, false);
-      const hit = hits[0];
-      if (!hit) {
-        if (this.selectedIndex >= 0) this.choose(-1);
-        return;
-      }
-      for (let r = 0; r < this.floors.length; r++) {
-        const index = this.floors[r].panels.findIndex((p) => p.mesh === hit.object);
-        if (index < 0) continue;
-        const same = r === this.activeRing && index === this.selectedIndex;
-        this.choose(same ? -1 : index, r);
-        return;
-      }
-    } finally {
-      this.fisheye.applyCameraCoverage(this.camera);
+    if (rect.width < 1 || rect.height < 1) return false;
+    const x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    return this.fisheye.screenToNdc(x, y, this.pointer);
+  }
+
+  private hitFromClient(
+    clientX: number,
+    clientY: number,
+  ): { ring: number; index: number } | null {
+    if (!this.pointerNdc(clientX, clientY)) return null;
+    this.fisheye.applyCameraCoverage(this.camera);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const meshes = this.floors.flatMap((floor) => floor.panels.map((p) => p.mesh));
+    const hit = this.raycaster.intersectObjects(meshes, false)[0];
+    if (!hit) return null;
+    for (let r = 0; r < this.floors.length; r++) {
+      const index = this.floors[r].panels.findIndex((p) => p.mesh === hit.object);
+      if (index >= 0) return { ring: r, index };
     }
+    return null;
+  }
+
+  private syncCursor(): void {
+    const canvas = this.renderer.domElement;
+    if (this.dragging) {
+      canvas.style.cursor = "grabbing";
+      return;
+    }
+    if (this.selectedIndex >= 0) {
+      canvas.style.cursor = "zoom-out";
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const { hoverX, hoverY } = this;
+    if (
+      hoverX < rect.left ||
+      hoverX > rect.right ||
+      hoverY < rect.top ||
+      hoverY > rect.bottom
+    ) {
+      canvas.style.cursor = "grab";
+      return;
+    }
+    canvas.style.cursor = this.hitFromClient(hoverX, hoverY) ? "pointer" : "grab";
+  }
+
+  private pick(clientX: number, clientY: number): void {
+    const hit = this.hitFromClient(clientX, clientY);
+    if (!hit) {
+      if (this.selectedIndex >= 0) this.choose(-1);
+      return;
+    }
+    const { ring, index } = hit;
+    if ((this.selectedIndex >= 0 || this.focusT > 0.001) && ring !== this.activeRing) {
+      if (this.selectedIndex >= 0) this.choose(-1);
+      this.queueFloor(ring, index);
+      return;
+    }
+    const same = ring === this.activeRing && index === this.selectedIndex;
+    this.choose(same ? -1 : index, ring);
   }
 }
 

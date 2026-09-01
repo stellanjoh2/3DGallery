@@ -142,6 +142,27 @@ export class FisheyePass {
     };
   }
 
+  /**
+   * Map a canvas NDC click through the pincushion / overscan crop
+   * to NDC for the scene camera (view offset applied).
+   */
+  screenToNdc(x: number, y: number, out: Vector2): boolean {
+    const dx = x * 0.5;
+    const dy = y * 0.5;
+    const r2 = dx * dx + dy * dy;
+    const k = this.material.uniforms.uStrength.value * 2.2;
+    const scale = 1 / Math.max(this.material.uniforms.uOverscan.value, 0.05);
+    const pinch = Math.max(1 - k * r2, 0);
+    const srcx = 0.5 + dx * pinch * scale;
+    const srcy = 0.5 + dy * pinch * scale;
+    const rt = this.material.uniforms.uRtScale.value as Vector2;
+    const rtx = 0.5 + (srcx - 0.5) * rt.x;
+    const rty = 0.5 + (srcy - 0.5) * rt.y;
+    if (rtx < 0 || rtx > 1 || rty < 0 || rty > 1) return false;
+    out.set(rtx * 2 - 1, rty * 2 - 1);
+    return true;
+  }
+
   applyCameraCoverage(camera: PerspectiveCamera): void {
     const fullW = this.outputW;
     const fullH = this.outputH;
