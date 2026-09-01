@@ -7,6 +7,7 @@ import {
 type CornerUniforms = {
   uRadius: IUniform<number>;
   uAspect: IUniform<number>;
+  uSaturation: IUniform<number>;
 };
 
 const CORNER_VERT = /* glsl */ `
@@ -16,9 +17,13 @@ varying vec2 vCornerUv;
 const CORNER_FRAG = /* glsl */ `
 uniform float uRadius;
 uniform float uAspect;
+uniform float uSaturation;
 varying vec2 vCornerUv;
 
-void applyRoundedCorners() {
+void applyPanelFinish() {
+  float luma = dot(gl_FragColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+  gl_FragColor.rgb = mix(vec3(luma), gl_FragColor.rgb, clamp(uSaturation, 0.0, 1.0));
+
   vec2 rs = vec2(max(uAspect, 0.001), 1.0);
   vec2 uv = vCornerUv * rs;
   vec2 halfSize = 0.5 * rs;
@@ -40,6 +45,7 @@ export function createPanelMaterial(
   const uniforms: CornerUniforms = {
     uRadius: { value: radius },
     uAspect: { value: aspect },
+    uSaturation: { value: 1 },
   };
 
   const material = new MeshBasicMaterial({
@@ -49,10 +55,11 @@ export function createPanelMaterial(
     premultipliedAlpha: true,
   });
   material.userData.corners = uniforms;
-  material.customProgramCacheKey = () => "ring-panel-round-v5";
+  material.customProgramCacheKey = () => "ring-panel-round-v6";
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uRadius = uniforms.uRadius;
     shader.uniforms.uAspect = uniforms.uAspect;
+    shader.uniforms.uSaturation = uniforms.uSaturation;
     shader.vertexShader =
       CORNER_VERT +
       shader.vertexShader.replace(
@@ -64,7 +71,7 @@ vCornerUv = uv;`,
       CORNER_FRAG + shader.fragmentShader
     ).replace(
       "#include <dithering_fragment>",
-      `applyRoundedCorners();
+      `applyPanelFinish();
 #include <dithering_fragment>`,
     );
   };
@@ -80,4 +87,13 @@ export function setPanelCorners(
   if (!uniforms) return;
   uniforms.uRadius.value = radius;
   uniforms.uAspect.value = aspect;
+}
+
+export function setPanelSaturation(
+  material: MeshBasicMaterial,
+  saturation: number,
+): void {
+  const uniforms = material.userData.corners as CornerUniforms | undefined;
+  if (!uniforms) return;
+  uniforms.uSaturation.value = saturation;
 }

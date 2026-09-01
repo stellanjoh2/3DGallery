@@ -23,7 +23,7 @@ void main() {
 }
 `;
 
-/** Pincushion lens: center stays readable, edges pull inward and fray. */
+/** Pincushion: edges enlarge toward the camera, center stays readable. */
 const FRAG = /* glsl */ `
 precision highp float;
 uniform sampler2D tDiffuse;
@@ -51,7 +51,7 @@ void main() {
   float r2 = dot(d, d);
   float k = uStrength * 2.2;
   float scale = 1.0 / max(uOverscan, 0.05);
-  vec2 src = c + d * (1.0 + k * r2) * scale;
+  vec2 src = c + d * max(1.0 - k * r2, 0.0) * scale;
 
   if (uChroma < 0.001) {
     gl_FragColor = sampleScene(toRt(src));
@@ -75,7 +75,6 @@ export class FisheyePass {
   private quad: Mesh<PlaneGeometry, ShaderMaterial>;
   private outputW = 1;
   private outputH = 1;
-  private coverageStrength = 0.45;
   private coverageOverscan = 1;
   private coverageChroma = 0;
 
@@ -112,9 +111,8 @@ export class FisheyePass {
     this.syncTarget();
   }
 
-  /** Size the scene target for unfocused lens settings, not the animated focus fade. */
-  setCoverage(strength: number, overscan: number, chroma: number): void {
-    this.coverageStrength = strength;
+  /** Size the scene target so focus (distortion faded out) stays in-bounds. */
+  setCoverage(overscan: number, chroma: number): void {
     this.coverageOverscan = overscan;
     this.coverageChroma = chroma;
     this.syncTarget();
@@ -179,10 +177,9 @@ export class FisheyePass {
   }
 
   private syncTarget(): void {
-    const k = Math.max(0, this.coverageStrength) * 2.2;
     const scale = 1 / Math.max(this.coverageOverscan, 0.05);
     const chroma = Math.max(0, this.coverageChroma);
-    const half = scale * (0.5 * (1 + 0.5 * k) + chroma * 0.5 * 3.4);
+    const half = scale * (0.5 + chroma * 0.5 * 3.4);
     const spanU = Math.min(1, 2 * half + 4 / this.outputW);
     const spanV = Math.min(1, 2 * half + 4 / this.outputH);
     const rtW = Math.max(1, Math.min(this.outputW, Math.round(spanU * this.outputW)));

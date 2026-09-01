@@ -30,6 +30,8 @@
         "#0a0a0a",
         "#ffd60a",
       ];
+      const upstairs = ["#7c5cff", "#00d4c8", "#ff8a3d", "#f5f5f5"];
+      const rooftop = ["#1a1a1a", "#ff2d55", "#f2f2f2"];
 
       function card(label, color, ink) {
         const canvas = document.createElement("canvas");
@@ -46,22 +48,30 @@
         return canvas.toDataURL("image/jpeg", 0.9);
       }
 
+      function deck(list, inkFor) {
+        return list.map((color, i) => ({
+          src: card(String(i + 1).padStart(2, "0"), color, inkFor(color, i)),
+        }));
+      }
+
       mountGallery("#gallery", {
         ratio: "portrait",
         distribution: "ring",
-        background: "#8f8f8f",
+        backgrounds: ["#8f8f8f", "#1c3a2a", "#0a2a44"],
         distortion: 0.15,
         chromaticAberration: 0.002,
         overscan: 1.75,
         cameraZoom: 0.83,
-        focusZoom: 0.65,
+        focusZoom: 1,
         spinFriction: 0.15,
         cornerRadius: 0.04,
         axisTilt: -5,
         ringTilt: -13,
-        items: colors.map((color, i) => ({
-          src: card(String(i + 1).padStart(2, "0"), color, i % 2 === 0 ? "#111" : "#fff"),
-        })),
+        rings: [
+          deck(colors, (color, i) => (i % 2 === 0 ? "#111" : "#fff")),
+          deck(upstairs, (color, i) => (i % 2 === 0 ? "#fff" : "#111")),
+          deck(rooftop, (color, i) => (color === "#f2f2f2" ? "#111" : "#fff")),
+        ],
       });
     </script>
   </body>

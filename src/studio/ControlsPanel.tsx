@@ -3,8 +3,10 @@ import {
   DISTRIBUTION_LABELS,
   DISTRIBUTIONS,
   MAX_ITEMS,
+  MAX_RINGS,
   RATIO_LABELS,
   RATIOS,
+  padBackgrounds,
   type Distribution,
   type GallerySettings,
   type Ratio,
@@ -19,10 +21,14 @@ type ControlsPanelProps = {
   itemCount: number;
   selectedIndex: number;
   canReplace: boolean;
+  ringCount: number;
+  activeRing: number;
   onSettingsChange: (patch: Partial<GallerySettings>) => void;
   onAddFiles: (files: File[]) => void;
   onReplaceFile: (file: File) => void;
   onRemoveSelected: () => void;
+  onAddRing: () => void;
+  onActiveRingChange: (ring: number) => void;
 };
 
 export function ControlsPanel({
@@ -30,10 +36,14 @@ export function ControlsPanel({
   itemCount,
   selectedIndex,
   canReplace,
+  ringCount,
+  activeRing,
   onSettingsChange,
   onAddFiles,
   onReplaceFile,
   onRemoveSelected,
+  onAddRing,
+  onActiveRingChange,
 }: ControlsPanelProps) {
   const addRef = useRef<HTMLInputElement>(null);
   const replaceRef = useRef<HTMLInputElement>(null);
@@ -45,7 +55,7 @@ export function ControlsPanel({
       {
         ratio: settings.ratio,
         distribution: settings.distribution,
-        background: settings.background,
+        backgrounds: settings.backgrounds,
         distortion: settings.distortion,
         chromaticAberration: settings.chromaticAberration,
         overscan: settings.overscan,
@@ -126,7 +136,8 @@ export function ControlsPanel({
           <h2>Art</h2>
           <p className="panel-hint">
             JPG, AVIF, GIF, or MP4. Select several at once. {itemCount}/{MAX_ITEMS}{" "}
-            on the ring.
+            on this ring
+            {ringCount > 1 ? ` (${activeRing + 1} of ${ringCount})` : ""}.
           </p>
           <input
             ref={addRef}
@@ -160,6 +171,53 @@ export function ControlsPanel({
           >
             {itemCount === 0 ? "Add images" : atMax ? "Ring full" : "Add images"}
           </button>
+          <button
+            type="button"
+            className="panel-btn"
+            disabled={ringCount >= MAX_RINGS}
+            onClick={onAddRing}
+          >
+            {ringCount >= MAX_RINGS ? "3 rings" : "Add ring"}
+          </button>
+          {ringCount > 1 ? (
+            <>
+              <p className="panel-hint">
+                Keys 1, 2, 3 move the camera. Click a frame on another floor to ride up.
+              </p>
+              <div
+                className={
+                  ringCount === 3
+                    ? "button-row button-row--3 button-row--choice"
+                    : "button-row button-row--choice"
+                }
+              >
+                {Array.from({ length: ringCount }, (_, i) => (
+                  <button
+                    key={i}
+                    type="button"
+                    className={activeRing === i ? "is-active" : ""}
+                    onClick={() => onActiveRingChange(i)}
+                  >
+                    {i + 1}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : null}
+          <p className="panel-hint">
+            {ringCount > 1
+              ? "This floor only. The wash eases with the camera."
+              : "Wash behind the ring."}
+          </p>
+          <ColorRow
+            label="Floor color"
+            value={settings.backgrounds[activeRing] ?? settings.backgrounds[0]}
+            onChange={(color) => {
+              const backgrounds = padBackgrounds(settings.backgrounds);
+              backgrounds[activeRing] = color;
+              onSettingsChange({ backgrounds });
+            }}
+          />
           <div className="button-row">
             <button
               type="button"
@@ -248,11 +306,6 @@ export function ControlsPanel({
             step={0.01}
             format={(v) => v.toFixed(2)}
             onChange={(cornerRadius) => onSettingsChange({ cornerRadius })}
-          />
-          <ColorRow
-            label="Background"
-            value={settings.background}
-            onChange={(background) => onSettingsChange({ background })}
           />
         </section>
 

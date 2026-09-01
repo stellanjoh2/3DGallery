@@ -3,17 +3,19 @@ import { RingGallery } from "../gallery/RingGallery";
 import type { GalleryItem, GallerySettings } from "../types";
 
 type GalleryViewProps = {
-  items: GalleryItem[];
+  rings: GalleryItem[][];
   settings: GallerySettings;
   selectedIndex: number;
+  activeRing: number;
   preview: boolean;
-  onSelect: (index: number) => void;
+  onSelect: (index: number, ring?: number) => void;
 };
 
 export function GalleryView({
-  items,
+  rings,
   settings,
   selectedIndex,
+  activeRing,
   preview,
   onSelect,
 }: GalleryViewProps) {
@@ -27,10 +29,11 @@ export function GalleryView({
     if (!host) return;
     const gallery = new RingGallery(host, {
       ...settings,
-      items,
+      rings,
       selectedIndex,
+      selectedRing: activeRing,
       preview,
-      onSelect: (index) => onSelectRef.current(index),
+      onSelect: (index, ring) => onSelectRef.current(index, ring),
     });
     galleryRef.current = gallery;
     return () => {
@@ -42,16 +45,20 @@ export function GalleryView({
   }, []);
 
   useEffect(() => {
-    galleryRef.current?.setItems(items);
-  }, [items]);
+    galleryRef.current?.setRings(rings);
+  }, [rings]);
 
   useEffect(() => {
     galleryRef.current?.setSettings(settings);
   }, [settings]);
 
   useEffect(() => {
-    galleryRef.current?.setSelectedIndex(selectedIndex);
-  }, [selectedIndex]);
+    galleryRef.current?.setActiveRing(activeRing);
+  }, [activeRing]);
+
+  useEffect(() => {
+    galleryRef.current?.setSelectedIndex(selectedIndex, activeRing);
+  }, [selectedIndex, activeRing]);
 
   useEffect(() => {
     galleryRef.current?.setPreview(preview);

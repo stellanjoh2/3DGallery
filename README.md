@@ -23,12 +23,12 @@ import { mountGallery } from "ring-gallery";
 const { destroy } = mountGallery("#gallery", {
   ratio: "portrait", // "landscape" | "square"
   distribution: "ring", // "cluster"
-  background: "#8f8f8f",
+  background: "#8f8f8f", // or `backgrounds: ["#8f8f8f", "#1c3a2a", "#0a2a44"]` per ring
   distortion: 0.15,
   chromaticAberration: 0.002,
   overscan: 1.75,
   cameraZoom: 0.83,
-  focusZoom: 0.65,
+  focusZoom: 1,
   spinFriction: 0.15,
   cornerRadius: 0.04,
   axisTilt: -5,

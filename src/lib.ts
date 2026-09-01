@@ -13,6 +13,7 @@ export {
   DISTRIBUTION_LABELS,
   DISTRIBUTIONS,
   MAX_ITEMS,
+  MAX_RINGS,
   RATIO_LABELS,
   RATIOS,
 } from "./types";

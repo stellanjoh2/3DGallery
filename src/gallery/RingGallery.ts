@@ -15,13 +15,15 @@ import {
 } from "three";
 import { createBentPanel, bendExisting } from "./bentPlane";
 import { FisheyePass } from "./fisheye";
-import { itemSize, ringRadius, slotAngles } from "./layout";
+import { floorY, itemSize, ringRadius, slotAngles } from "./layout";
 import { kindFromSrc, loadMedia, type LoadedMedia } from "./media";
-import { createPanelMaterial, setPanelCorners } from "./panelMaterial";
-import { FocusBlurOverlay, type FocusPlate } from "./focusBlur";
+import { createPanelMaterial, setPanelCorners, setPanelSaturation } from "./panelMaterial";
 import {
   DEFAULT_SETTINGS,
   MAX_ITEMS,
+  MAX_RINGS,
+  RATIO_VALUE,
+  padBackgrounds,
   type GalleryItem,
   type GalleryOptions,
   type GallerySettings,
@@ -30,13 +32,15 @@ import {
 const SEGMENTS = 48;
 const HOME_Y = 0.04;
 const BASE_FOV = 72;
-const DOLLY = 0.26;
+/** Slight extra zoom so the panel reaches the viewport edges through AA. */
+const FILL = 1.02;
 const SPIN_MAX = 4.2;
 const WHEEL_MAX = 0.72;
-const ZOOM_IN = 0.4;
-const ZOOM_OUT = 0.32;
-const DIM_OPACITY = 0.5;
-const FOCUS_BLUR_PX = 16;
+/** rad/s. Index 0 = speed 1 (very slow). Last is brisk, not a blur. */
+const AUTO_SPEEDS = [0.04, 0.08, 0.14, 0.24, 0.38, 0.55, 0.75, 1.0];
+const ZOOM_IN = 0.8;
+const ZOOM_OUT = 0.64;
+const MOTION_EASE = "power2.inOut";
 
 type Panel = {
   group: Group;
@@ -44,9 +48,20 @@ type Panel = {
   angle: number;
   targetAngle: number;
   flatten: number;
+  saturation: number;
   src: string;
   loadGen: number;
   media: LoadedMedia | null;
+};
+
+type Floor = {
+  group: Group;
+  items: GalleryItem[];
+  panels: Panel[];
+  radius: number;
+  targetRadius: number;
+  spin: number;
+  spinVel: number;
 };
 
 export class RingGallery {
@@ -55,27 +70,23 @@ export class RingGallery {
   private scene = new Scene();
   private camera: PerspectiveCamera;
   private axis = new Group();
-  private ring = new Group();
+  private floors: Floor[] = [];
   private fisheye = new FisheyePass();
-  private focusBlur: FocusBlurOverlay;
   private raycaster = new Raycaster();
   private pointer = new Vector2();
-  private ndc = new Vector3();
-  private bg = new Color(DEFAULT_SETTINGS.background);
+  private bg = new Color(DEFAULT_SETTINGS.backgrounds[0]);
 
   private settings: GallerySettings = { ...DEFAULT_SETTINGS };
-  private items: GalleryItem[] = [];
-  private panels: Panel[] = [];
+  private activeRing = 0;
   private selectedIndex = -1;
   private facedIndex = -1;
-  private onSelect: ((index: number) => void) | null = null;
+  private onSelect: ((index: number, ring?: number) => void) | null = null;
 
-  private radius = ringRadius(0, "landscape");
-  private targetRadius = this.radius;
-  private spin = 0;
-  private spinVel = 0;
+  private autoRotate = false;
+  private autoSpeed = 1;
   private aligning = false;
   private focusT = 0;
+  private floorY = 0;
   private focusPoint = new Vector3(0, 0, -3.3);
   private homePos = new Vector3(0, HOME_Y, 0);
   private homeLook = new Vector3(0, 0, -1);
@@ -90,14 +101,13 @@ export class RingGallery {
   private raf = 0;
   private disposed = false;
   private ro: ResizeObserver;
+  private stepBlend = { t: 0 };
 
   constructor(el: HTMLElement, options: GalleryOptions = {}) {
     this.el = el;
     this.settings = { ...DEFAULT_SETTINGS, ...pickSettings(options) };
-    this.items = options.items?.slice(0, MAX_ITEMS) ?? [];
-    this.selectedIndex = options.selectedIndex ?? -1;
+    this.settings.backgrounds = padBackgrounds(this.settings.backgrounds);
     this.onSelect = options.onSelect ?? null;
-    this.bg.set(this.settings.background);
 
     this.camera = new PerspectiveCamera(BASE_FOV, 1, 0.08, 80);
 
@@ -113,21 +123,24 @@ export class RingGallery {
     this.renderer.domElement.style.height = "100%";
     this.renderer.domElement.style.touchAction = "none";
     el.appendChild(this.renderer.domElement);
-    this.focusBlur = new FocusBlurOverlay(el);
 
     this.scene.background = this.bg;
-    this.axis.add(this.ring);
     this.scene.add(this.axis);
     this.fisheye.setBackground(this.bg.r, this.bg.g, this.bg.b);
     this.fisheye.setChroma(this.settings.chromaticAberration);
     this.fisheye.setOverscan(this.settings.overscan);
+
+    for (const items of initialRings(options)) this.addFloor(items);
+    this.placeFloors();
+    this.activeRing = clampRing(options.selectedRing ?? 0, this.floors.length);
+    this.selectedIndex = options.selectedIndex ?? -1;
+    this.floorY = floorY(this.activeRing, this.settings.ratio);
+    this.bg.set(this.ringColor(this.activeRing));
+    this.paintBg();
+
     this.syncFisheyeCoverage();
     this.applyView();
     this.applyCamera();
-
-    this.radius = ringRadius(this.items.length, this.settings.ratio);
-    this.targetRadius = this.radius;
-    if (this.items.length) this.syncPanels();
     if (this.selectedIndex >= 0) this.focusIndex(this.selectedIndex);
 
     this.onPointerDown = this.onPointerDown.bind(this);
@@ -152,32 +165,46 @@ export class RingGallery {
   }
 
   setItems(items: GalleryItem[]): void {
-    const next = items.slice(0, MAX_ITEMS);
-    const unchanged =
-      next.length === this.items.length &&
-      next.every((item, i) => item.src === this.items[i]?.src);
-    this.items = next;
-    this.targetRadius = ringRadius(this.items.length, this.settings.ratio);
-    if (this.selectedIndex >= this.items.length) {
-      this.selectedIndex = this.items.length - 1;
-      if (this.selectedIndex < 0) this.blurFocus();
+    if (this.floors.length === 0) this.addFloor([]);
+    this.setFloorItems(this.floors[0], items);
+  }
+
+  setRings(rings: GalleryItem[][]): void {
+    const next = normalizeRings(rings);
+    let countChanged = false;
+    while (this.floors.length > next.length) {
+      this.removeLastFloor();
+      countChanged = true;
     }
-    if (unchanged) return;
-    this.syncPanels();
+    while (this.floors.length < next.length) {
+      this.addFloor([]);
+      countChanged = true;
+    }
+    if (countChanged) this.placeFloors();
+    next.forEach((items, i) => this.setFloorItems(this.floors[i], items));
+    if (this.activeRing >= this.floors.length) {
+      this.goToFloor(this.floors.length - 1);
+    }
+  }
+
+  setActiveRing(index: number): void {
+    if (index < 0 || index >= this.floors.length || index === this.activeRing) return;
+    this.goToFloor(index);
   }
 
   setSettings(patch: Partial<GallerySettings>): void {
+    const prevColor = this.ringColor(this.activeRing);
     const next = { ...this.settings, ...patch };
+    if (patch.backgrounds) next.backgrounds = padBackgrounds(patch.backgrounds);
     const ratioChanged = next.ratio !== this.settings.ratio;
     const distributionChanged = next.distribution !== this.settings.distribution;
     const cornersChanged = next.cornerRadius !== this.settings.cornerRadius;
     this.settings = next;
 
-    if (patch.background) {
-      this.bg.set(patch.background);
-      this.scene.background = this.bg;
-      this.renderer.setClearColor(this.bg, 1);
-      this.fisheye.setBackground(this.bg.r, this.bg.g, this.bg.b);
+    if (this.ringColor(this.activeRing) !== prevColor) {
+      gsap.killTweensOf(this.bg);
+      this.bg.set(this.ringColor(this.activeRing));
+      this.paintBg();
     }
     if (patch.chromaticAberration != null) this.fisheye.setChroma(patch.chromaticAberration);
     if (patch.overscan != null) this.fisheye.setOverscan(patch.overscan);
@@ -185,18 +212,23 @@ export class RingGallery {
     this.applyView();
 
     if (ratioChanged) {
-      this.targetRadius = ringRadius(this.items.length, this.settings.ratio);
+      for (const floor of this.floors) {
+        floor.targetRadius = ringRadius(floor.items.length, this.settings.ratio);
+      }
+      this.placeFloors();
+      this.retargetFloorY();
       this.applyCorners();
       this.fitPanelTextures();
-      this.layoutPanels(true);
+      for (const floor of this.floors) this.layoutPanels(floor, true);
     } else if (distributionChanged) {
-      this.layoutPanels(true);
+      for (const floor of this.floors) this.layoutPanels(floor, true);
     } else if (cornersChanged) {
       this.applyCorners();
     }
   }
 
-  setSelectedIndex(index: number): void {
+  setSelectedIndex(index: number, ring = this.activeRing): void {
+    if (ring !== this.activeRing) this.goToFloor(ring);
     if (index === this.selectedIndex) return;
     this.selectedIndex = index;
     if (index < 0) this.blurFocus();
@@ -205,16 +237,18 @@ export class RingGallery {
 
   setPreview(_preview: boolean): void {}
 
-  setOnSelect(cb: ((index: number) => void) | null): void {
+  setOnSelect(cb: ((index: number, ring?: number) => void) | null): void {
     this.onSelect = cb;
   }
 
   destroy(): void {
     this.disposed = true;
     gsap.killTweensOf(this);
-    for (const panel of this.panels) {
-      gsap.killTweensOf(panel);
-      gsap.killTweensOf(panel.mesh.material);
+    gsap.killTweensOf(this.bg);
+    gsap.killTweensOf(this.stepBlend);
+    for (const floor of this.floors) {
+      gsap.killTweensOf(floor);
+      for (const panel of floor.panels) gsap.killTweensOf(panel);
     }
     cancelAnimationFrame(this.raf);
     this.ro.disconnect();
@@ -224,63 +258,148 @@ export class RingGallery {
     window.removeEventListener("pointerup", this.onPointerUp);
     canvas.removeEventListener("wheel", this.onWheel);
     window.removeEventListener("keydown", this.onKeyDown);
-    this.clearPanels();
-    this.focusBlur.destroy();
+    this.clearFloors();
     this.fisheye.dispose();
     this.renderer.dispose();
     canvas.remove();
+  }
+
+  private active(): Floor {
+    return this.floors[this.activeRing] ?? this.floors[0];
+  }
+
+  private addFloor(items: GalleryItem[]): Floor {
+    const group = new Group();
+    this.axis.add(group);
+    const count = Math.min(items.length, MAX_ITEMS);
+    const radius = ringRadius(count, this.settings.ratio);
+    const floor: Floor = {
+      group,
+      items: items.slice(0, MAX_ITEMS),
+      panels: [],
+      radius,
+      targetRadius: radius,
+      spin: 0,
+      spinVel: 0,
+    };
+    this.floors.push(floor);
+    this.syncFloorPanels(floor);
+    return floor;
+  }
+
+  private removeLastFloor(): void {
+    const floor = this.floors.pop();
+    if (!floor) return;
+    gsap.killTweensOf(floor);
+    for (const panel of floor.panels) disposePanel(panel, floor.group);
+    this.axis.remove(floor.group);
+  }
+
+  private placeFloors(): void {
+    for (let i = 0; i < this.floors.length; i++) {
+      this.floors[i].group.position.y = floorY(i, this.settings.ratio);
+    }
+  }
+
+  private retargetFloorY(): void {
+    const y = floorY(this.activeRing, this.settings.ratio);
+    gsap.killTweensOf(this, "floorY");
+    this.floorY = y;
+  }
+
+  private goToFloor(index: number): void {
+    if (index < 0 || index >= this.floors.length) return;
+    this.activeRing = index;
+    const duration = this.motionDuration(ZOOM_IN);
+    gsap.to(this, {
+      floorY: floorY(index, this.settings.ratio),
+      duration,
+      ease: MOTION_EASE,
+      overwrite: "auto",
+    });
+    const target = new Color(this.ringColor(index));
+    gsap.killTweensOf(this.bg);
+    gsap.to(this.bg, {
+      r: target.r,
+      g: target.g,
+      b: target.b,
+      duration,
+      ease: MOTION_EASE,
+      overwrite: "auto",
+    });
+  }
+
+  private setFloorItems(floor: Floor, items: GalleryItem[]): void {
+    const next = items.slice(0, MAX_ITEMS);
+    const unchanged =
+      next.length === floor.items.length &&
+      next.every((item, i) => item.src === floor.items[i]?.src);
+    floor.items = next;
+    floor.targetRadius = ringRadius(next.length, this.settings.ratio);
+    if (floor === this.active() && this.selectedIndex >= next.length) {
+      this.selectedIndex = next.length - 1;
+      if (this.selectedIndex < 0) this.blurFocus();
+    }
+    if (unchanged) return;
+    this.syncFloorPanels(floor);
   }
 
   private applyCorners(): void {
     const { width, height } = itemSize(this.settings.ratio);
     const aspect = width / height;
     const radius = this.settings.cornerRadius;
-    for (const panel of this.panels) {
-      setPanelCorners(panel.mesh.material, radius, aspect);
+    for (const floor of this.floors) {
+      for (const panel of floor.panels) {
+        setPanelCorners(panel.mesh.material, radius, aspect);
+      }
     }
   }
 
   private fitPanelTextures(): void {
     const { width, height } = itemSize(this.settings.ratio);
     const aspect = width / height;
-    for (const panel of this.panels) {
-      panel.media?.applyFit(aspect);
+    for (const floor of this.floors) {
+      for (const panel of floor.panels) {
+        panel.media?.applyFit(aspect);
+      }
     }
   }
 
-  private syncPanels(): void {
-    const count = this.items.length;
-    while (this.panels.length > count) {
-      const panel = this.panels.pop();
-      if (panel) disposePanel(panel, this.ring);
+  private syncFloorPanels(floor: Floor): void {
+    const count = floor.items.length;
+    while (floor.panels.length > count) {
+      const panel = floor.panels.pop();
+      if (panel) disposePanel(panel, floor.group);
     }
-    while (this.panels.length < count) {
-      this.panels.push(this.makePanel());
+    while (floor.panels.length < count) {
+      floor.panels.push(this.makePanel(floor));
     }
-    this.layoutPanels(true);
-    this.items.forEach((item, i) => {
-      const panel = this.panels[i];
+    this.layoutPanels(floor, true);
+    floor.items.forEach((item, i) => {
+      const panel = floor.panels[i];
       if (!panel || panel.src === item.src) return;
       panel.src = item.src;
       panel.loadGen += 1;
-      void this.loadPanel(i, item, panel.loadGen);
+      void this.loadPanel(floor, i, item, panel.loadGen);
     });
   }
 
-  private makePanel(): Panel {
+  private makePanel(floor: Floor): Panel {
     const { width, height } = itemSize(this.settings.ratio);
-    const geo = createBentPanel(width, height, this.radius, SEGMENTS);
+    const geo = createBentPanel(width, height, floor.radius, SEGMENTS);
     const aspect = width / height;
     const material = createPanelMaterial(
       { color: 0x141414 },
       this.settings.cornerRadius,
       aspect,
     );
+    const saturation = 1;
+    setPanelSaturation(material, saturation);
 
     const mesh = new Mesh(geo, material);
     const group = new Group();
     group.add(mesh);
-    this.ring.add(group);
+    floor.group.add(group);
 
     return {
       group,
@@ -288,33 +407,39 @@ export class RingGallery {
       angle: 0,
       targetAngle: 0,
       flatten: 0,
+      saturation,
       src: "",
       loadGen: 0,
       media: null,
     };
   }
 
-  private layoutPanels(snap: boolean): void {
+  private layoutPanels(floor: Floor, snap: boolean): void {
     const angles = slotAngles(
-      this.panels.length,
+      floor.panels.length,
       this.settings.ratio,
-      this.radius,
+      floor.radius,
       this.settings.distribution,
     );
-    for (let i = 0; i < this.panels.length; i++) {
-      const panel = this.panels[i];
+    for (let i = 0; i < floor.panels.length; i++) {
+      const panel = floor.panels[i];
       panel.targetAngle = angles[i] ?? 0;
       if (snap) panel.angle = panel.targetAngle;
-      this.applyPanelShape(panel);
+      this.applyPanelShape(panel, floor.radius);
       panel.group.rotation.y = panel.angle;
     }
   }
 
-  private async loadPanel(index: number, item: GalleryItem, gen: number): Promise<void> {
+  private async loadPanel(
+    floor: Floor,
+    index: number,
+    item: GalleryItem,
+    gen: number,
+  ): Promise<void> {
     try {
       const kind = kindFromSrc(item.src, item.kind);
       const media = await loadMedia(item.src, kind);
-      const panel = this.panels[index];
+      const panel = floor.panels[index];
       if (this.disposed || !panel || panel.loadGen !== gen) {
         media.dispose();
         return;
@@ -331,9 +456,8 @@ export class RingGallery {
     }
   }
 
-  private clearPanels(): void {
-    for (const panel of this.panels) disposePanel(panel, this.ring);
-    this.panels = [];
+  private clearFloors(): void {
+    while (this.floors.length) this.removeLastFloor();
   }
 
   private resize(): void {
@@ -353,37 +477,48 @@ export class RingGallery {
     this.lastT = now;
 
     const k = 1 - Math.exp(-dt * 7);
-    this.radius += (this.targetRadius - this.radius) * k;
-    if (Math.abs(this.targetRadius - this.radius) > 0.0008) {
-      this.layoutPanels(false);
+    for (let i = 0; i < this.floors.length; i++) {
+      const floor = this.floors[i];
+      floor.radius += (floor.targetRadius - floor.radius) * k;
+      if (Math.abs(floor.targetRadius - floor.radius) > 0.0008) {
+        this.layoutPanels(floor, false);
+      }
+      for (const panel of floor.panels) {
+        panel.angle += (panel.targetAngle - panel.angle) * k;
+        panel.group.rotation.y = panel.angle;
+        panel.media?.tick?.();
+      }
+      this.spinFloor(floor, i, dt);
     }
 
-    for (const panel of this.panels) {
-      panel.angle += (panel.targetAngle - panel.angle) * k;
-      panel.group.rotation.y = panel.angle;
-      panel.media?.tick?.();
-    }
+    this.applyView();
+    this.applyCamera();
+    this.paintBg();
 
-    if (!this.dragging && !this.aligning) {
-      this.spin += this.spinVel * dt;
-      const speed = Math.abs(this.spinVel);
+    this.fisheye.render(this.renderer, this.scene, this.camera);
+    this.raf = requestAnimationFrame(this.loop);
+  }
+
+  private spinFloor(floor: Floor, index: number, dt: number): void {
+    const dir = index % 2 === 0 ? 1 : -1;
+    const isActive = index === this.activeRing;
+    const dragging = this.dragging && isActive;
+    const focused = this.selectedIndex >= 0 && isActive;
+    const autoSpin = this.autoRotate && !dragging && !focused;
+
+    if (autoSpin) {
+      floor.spin += AUTO_SPEEDS[this.autoSpeed - 1] * dt * dir;
+      floor.spinVel = 0;
+    } else if (!dragging && !(this.aligning && isActive)) {
+      floor.spin += floor.spinVel * dt;
+      const speed = Math.abs(floor.spinVel);
       if (speed > 0) {
         const linear = 1.05 + this.settings.spinFriction * 3.75;
         const drop = linear * (0.7 + 0.3 * (speed / (speed + 0.45))) * dt;
-        this.spinVel = speed <= drop ? 0 : this.spinVel - Math.sign(this.spinVel) * drop;
+        floor.spinVel = speed <= drop ? 0 : floor.spinVel - Math.sign(floor.spinVel) * drop;
       }
     }
-    this.ring.rotation.y = this.spin;
-    this.applyView();
-    this.applyCamera();
-
-    const plate = this.focusPlate();
-    const mesh = this.panels[this.selectedIndex]?.mesh;
-    if (plate && mesh) mesh.visible = false;
-    this.fisheye.render(this.renderer, this.scene, this.camera);
-    if (mesh) mesh.visible = true;
-    this.syncFocusBlur(plate);
-    this.raf = requestAnimationFrame(this.loop);
+    floor.group.rotation.y = floor.spin;
   }
 
   private applyView(): void {
@@ -393,29 +528,51 @@ export class RingGallery {
     this.axis.rotation.x = (axisX * Math.PI) / 180;
     this.axis.rotation.z = (axisZ * Math.PI) / 180;
 
-    const primary = safeZoom(this.settings.cameraZoom);
-    const focused = safeZoom(this.settings.focusZoom);
-    this.camera.fov = BASE_FOV / (primary + (focused - primary) * t);
+    this.camera.fov = BASE_FOV / safeZoom(this.settings.cameraZoom);
     this.fisheye.setStrength(this.settings.distortion * (1 - t));
     this.fisheye.setChroma(this.settings.chromaticAberration * (1 - t));
     this.fisheye.applyCameraCoverage(this.camera);
   }
 
+  /** Distance from panel that fills the viewport at the current lens. */
+  private focusDistance(): number {
+    const { width, height } = itemSize(this.settings.ratio);
+    const aspect =
+      Math.max(1, this.el.clientWidth) / Math.max(1, this.el.clientHeight);
+    const half = (this.camera.fov * Math.PI) / 360;
+    const span = Math.max(0.05, this.fisheye.coverageSpan().y);
+    const tan = Math.tan(half) * span;
+    const byHeight = height / (2 * tan * FILL);
+    const byWidth = width / (2 * tan * aspect * FILL);
+    const fill =
+      RATIO_VALUE[this.settings.ratio] > 1
+        ? Math.min(byHeight, byWidth)
+        : byHeight;
+    return Math.max(0.12, fill / safeZoom(this.settings.focusZoom));
+  }
+
   private syncFisheyeCoverage(): void {
     this.fisheye.setCoverage(
-      this.settings.distortion,
       this.settings.overscan,
       this.settings.chromaticAberration,
     );
   }
 
   private applyCamera(): void {
+    const t = this.focusT;
+    this.homePos.set(0, HOME_Y * (1 - t) + this.floorY, 0);
+    this.homeLook.set(0, this.floorY, -1);
     if (this.focusT > 0.001) {
-      this.focusPoint.set(0, 0, -this.radius);
+      const floor = this.active();
+      this.focusPoint.set(0, floor.group.position.y, -floor.radius);
       this.axis.localToWorld(this.focusPoint);
-      this.zoomPos.copy(this.homePos).lerp(this.focusPoint, DOLLY);
-      this.camPos.copy(this.homePos).lerp(this.zoomPos, this.focusT);
-      this.camLook.copy(this.homeLook).lerp(this.focusPoint, this.focusT);
+      this.zoomPos.copy(this.homePos).sub(this.focusPoint);
+      const away = this.zoomPos.length();
+      if (away < 1e-5) this.zoomPos.set(0, 0, 1);
+      else this.zoomPos.multiplyScalar(1 / away);
+      this.zoomPos.multiplyScalar(this.focusDistance()).add(this.focusPoint);
+      this.camPos.copy(this.homePos).lerp(this.zoomPos, t);
+      this.camLook.copy(this.homeLook).lerp(this.focusPoint, t);
     } else {
       this.camPos.copy(this.homePos);
       this.camLook.copy(this.homeLook);
@@ -424,112 +581,50 @@ export class RingGallery {
     this.camera.lookAt(this.camLook);
   }
 
+  private ringColor(index: number): string {
+    return this.settings.backgrounds[index] ?? this.settings.backgrounds[0];
+  }
+
+  private paintBg(): void {
+    this.renderer.setClearColor(this.bg, 1);
+    this.fisheye.setBackground(this.bg.r, this.bg.g, this.bg.b);
+  }
+
   private motionDuration(seconds: number): number {
     return window.matchMedia("(prefers-reduced-motion: reduce)").matches
       ? 0
       : seconds;
   }
 
-  private applyPanelShape(panel: Panel): void {
+  private applyPanelShape(panel: Panel, radius: number): void {
     const { width, height } = itemSize(this.settings.ratio);
-    bendExisting(panel.mesh.geometry, width, height, this.radius, panel.flatten);
-  }
-
-  private syncFocusBlur(plate: FocusPlate | null): void {
-    const t = this.focusT;
-    if (t < 0.01 || this.selectedIndex < 0) {
-      this.focusBlur.update(null, 0, null);
-      return;
-    }
-    this.focusBlur.update(this.focusedPanelHole(), t * FOCUS_BLUR_PX, plate);
-  }
-
-  private focusPlate(): FocusPlate | null {
-    if (this.focusT < 0.01 || this.selectedIndex < 0) return null;
-    const panel = this.panels[this.selectedIndex];
-    const map = panel?.mesh.material.map;
-    const source = map?.image;
-    if (
-      !(source instanceof HTMLImageElement) &&
-      !(source instanceof HTMLVideoElement) &&
-      !(source instanceof HTMLCanvasElement)
-    ) {
-      return null;
-    }
-    return {
-      source,
-      repeatX: map.repeat.x,
-      repeatY: map.repeat.y,
-      offsetX: map.offset.x,
-      offsetY: map.offset.y,
-    };
-  }
-
-  private focusedPanelHole(): { x: number; y: number; w: number; h: number; r: number } | null {
-    const panel = this.panels[this.selectedIndex];
-    if (!panel) return null;
-
-    const pos = panel.mesh.geometry.attributes.position;
-    const segs = panel.mesh.geometry.parameters.widthSegments;
-    const corners = [0, segs, segs + 1, (segs + 1) * 2 - 1];
-    const w = Math.max(1, this.el.clientWidth);
-    const h = Math.max(1, this.el.clientHeight);
-    const overscan = Math.max(this.settings.overscan, 0.05);
-    const span = this.fisheye.coverageSpan();
-
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-
-    for (const i of corners) {
-      this.ndc.fromBufferAttribute(pos, i);
-      panel.mesh.localToWorld(this.ndc);
-      this.ndc.project(this.camera);
-      const sx = (0.5 + this.ndc.x * 0.5 * overscan * span.x) * w;
-      const sy = (0.5 - this.ndc.y * 0.5 * overscan * span.y) * h;
-      minX = Math.min(minX, sx);
-      maxX = Math.max(maxX, sx);
-      minY = Math.min(minY, sy);
-      maxY = Math.max(maxY, sy);
-    }
-
-    if (!Number.isFinite(minX)) return null;
-    const wPx = maxX - minX;
-    const hPx = maxY - minY;
-    return {
-      x: minX,
-      y: minY,
-      w: wPx,
-      h: hPx,
-      r: this.settings.cornerRadius * Math.min(wPx, hPx),
-    };
+    bendExisting(panel.mesh.geometry, width, height, radius, panel.flatten);
   }
 
   private applyFocusPresentation(): void {
-    const focusing = this.selectedIndex >= 0;
-    const duration = this.motionDuration(focusing ? ZOOM_IN : ZOOM_OUT);
-    const ease = focusing ? "power3.out" : "power2.inOut";
+    const duration = this.motionDuration(this.selectedIndex >= 0 ? ZOOM_IN : ZOOM_OUT);
+    const active = this.active();
 
-    for (let i = 0; i < this.panels.length; i++) {
-      const panel = this.panels[i];
-      const flatten = i === this.selectedIndex ? 1 : 0;
-      const opacity = focusing && i !== this.selectedIndex ? DIM_OPACITY : 1;
-      gsap.to(panel, {
-        flatten,
-        duration,
-        ease,
-        overwrite: "auto",
-        onUpdate: () => this.applyPanelShape(panel),
-        onComplete: () => this.applyPanelShape(panel),
-      });
-      gsap.to(panel.mesh.material, {
-        opacity,
-        duration,
-        ease,
-        overwrite: "auto",
-      });
+    for (const floor of this.floors) {
+      for (let i = 0; i < floor.panels.length; i++) {
+        const panel = floor.panels[i];
+        const flatten = floor === active && i === this.selectedIndex ? 1 : 0;
+        gsap.to(panel, {
+          flatten,
+          saturation: 1,
+          duration,
+          ease: MOTION_EASE,
+          overwrite: "auto",
+          onUpdate: () => this.applyPanelPresentation(panel, floor),
+          onComplete: () => this.applyPanelPresentation(panel, floor),
+        });
+      }
     }
+  }
+
+  private applyPanelPresentation(panel: Panel, floor: Floor): void {
+    this.applyPanelShape(panel, floor.radius);
+    setPanelSaturation(panel.mesh.material, panel.saturation);
   }
 
   private focusIndex(index: number): void {
@@ -538,23 +633,56 @@ export class RingGallery {
   }
 
   private faceIndex(index: number, focus: boolean): void {
-    const panel = this.panels[index];
+    const floor = this.active();
+    const panel = floor.panels[index];
     if (!panel) return;
-    this.spinVel = 0;
+    floor.spinVel = 0;
     this.aligning = true;
     this.facedIndex = index;
-    const facing = shortestSpin(this.spin, -panel.angle);
-    gsap.killTweensOf(this, focus ? "spin,focusT" : "spin");
-    gsap.to(this, {
-      spin: facing,
-      ...(focus ? { focusT: 1 } : {}),
-      duration: this.motionDuration(ZOOM_IN),
-      ease: "power3.out",
-      overwrite: "auto",
-      onComplete: () => {
-        this.aligning = false;
-      },
-    });
+    const facing = shortestSpin(floor.spin, -panel.angle);
+    const duration = this.motionDuration(ZOOM_IN);
+    gsap.killTweensOf(floor, "spin");
+    gsap.killTweensOf(this.stepBlend);
+
+    if (!focus && this.autoRotate && duration > 0) {
+      const dir = this.activeRing % 2 === 0 ? 1 : -1;
+      const cruise = AUTO_SPEEDS[this.autoSpeed - 1] * dir;
+      const extra = facing - floor.spin - cruise * duration;
+      this.stepBlend.t = 0;
+      let last = 0;
+      gsap.to(this.stepBlend, {
+        t: 1,
+        duration,
+        ease: MOTION_EASE,
+        overwrite: true,
+        onUpdate: () => {
+          floor.spin += extra * (this.stepBlend.t - last);
+          last = this.stepBlend.t;
+        },
+        onComplete: () => {
+          this.aligning = false;
+        },
+      });
+    } else {
+      gsap.to(floor, {
+        spin: facing,
+        duration,
+        ease: MOTION_EASE,
+        overwrite: "auto",
+        onComplete: () => {
+          this.aligning = false;
+        },
+      });
+    }
+
+    if (focus) {
+      gsap.to(this, {
+        focusT: 1,
+        duration,
+        ease: MOTION_EASE,
+        overwrite: "auto",
+      });
+    }
   }
 
   private blurFocus(): void {
@@ -563,26 +691,28 @@ export class RingGallery {
     gsap.to(this, {
       focusT: 0,
       duration: this.motionDuration(ZOOM_OUT),
-      ease: "power2.inOut",
+      ease: MOTION_EASE,
       overwrite: "auto",
     });
     this.applyFocusPresentation();
   }
 
-  private choose(index: number): void {
+  private choose(index: number, ring = this.activeRing): void {
+    if (ring !== this.activeRing) this.goToFloor(ring);
     this.selectedIndex = index;
     if (index < 0) this.blurFocus();
     else this.focusIndex(index);
-    this.onSelect?.(index);
+    this.onSelect?.(index, ring);
   }
 
   private frontIndex(): number {
-    const n = this.panels.length;
+    const floor = this.active();
+    const n = floor.panels.length;
     if (n === 0) return -1;
     let best = 0;
     let bestDist = Infinity;
     for (let i = 0; i < n; i++) {
-      const dist = Math.abs(shortestSpin(0, this.panels[i].angle + this.spin));
+      const dist = Math.abs(shortestSpin(0, floor.panels[i].angle + floor.spin));
       if (dist < bestDist) {
         bestDist = dist;
         best = i;
@@ -598,22 +728,43 @@ export class RingGallery {
   }
 
   private step(delta: number): void {
-    const n = this.panels.length;
+    const n = this.active().panels.length;
     if (n <= 1) return;
     const current = this.currentItem();
     if (current < 0) return;
-    const next = (current + delta + n) % n;
-    if (this.selectedIndex >= 0) this.choose(next);
-    else this.faceIndex(next, false);
+    this.faceIndex((current + delta + n) % n, false);
   }
 
   private onKeyDown(event: KeyboardEvent): void {
     if (event.defaultPrevented) return;
     if (event.metaKey || event.ctrlKey || event.altKey) return;
     if (isTypingTarget(event.target)) return;
-    if (this.panels.length === 0) return;
+    if (this.floors.length === 0) return;
+
+    if (event.key === "1" || event.key === "2" || event.key === "3") {
+      const floor = Number(event.key) - 1;
+      if (floor >= this.floors.length) return;
+      if (floor === this.activeRing && this.selectedIndex < 0) return;
+      event.preventDefault();
+      this.choose(-1, floor);
+      return;
+    }
 
     switch (event.key) {
+      case " ":
+        if (event.repeat) return;
+        if (isActivateTarget(event.target)) return;
+        event.preventDefault();
+        this.toggleAutoRotate();
+        break;
+      case "PageUp":
+        event.preventDefault();
+        this.nudgeAutoSpeed(1);
+        break;
+      case "PageDown":
+        event.preventDefault();
+        this.nudgeAutoSpeed(-1);
+        break;
       case "ArrowUp":
         event.preventDefault();
         if (this.selectedIndex < 0) this.choose(this.currentItem());
@@ -624,18 +775,36 @@ export class RingGallery {
         break;
       case "ArrowLeft":
         event.preventDefault();
-        this.step(1);
+        if (this.selectedIndex >= 0) this.choose(-1);
+        else this.step(1);
         break;
       case "ArrowRight":
         event.preventDefault();
-        this.step(-1);
+        if (this.selectedIndex >= 0) this.choose(-1);
+        else this.step(-1);
         break;
     }
   }
 
+  private toggleAutoRotate(): void {
+    if (this.autoRotate) {
+      this.autoRotate = false;
+      return;
+    }
+    this.autoRotate = true;
+    for (const floor of this.floors) floor.spinVel = 0;
+    this.releaseSpin();
+    if (this.selectedIndex >= 0) this.choose(-1);
+  }
+
+  private nudgeAutoSpeed(delta: number): void {
+    this.autoSpeed = Math.max(1, Math.min(AUTO_SPEEDS.length, this.autoSpeed + delta));
+  }
+
   private releaseSpin(): void {
     this.aligning = false;
-    gsap.killTweensOf(this, "spin");
+    gsap.killTweensOf(this.active(), "spin");
+    gsap.killTweensOf(this.stepBlend);
   }
 
   private onPointerDown(event: PointerEvent): void {
@@ -643,7 +812,7 @@ export class RingGallery {
     this.moved = false;
     this.lastX = event.clientX;
     this.lastDragT = performance.now();
-    this.spinVel = 0;
+    this.active().spinVel = 0;
     this.releaseSpin();
     this.renderer.domElement.setPointerCapture(event.pointerId);
   }
@@ -660,11 +829,12 @@ export class RingGallery {
     if (this.selectedIndex >= 0) this.choose(-1);
     const w = Math.max(1, this.el.clientWidth);
     const delta = (dx / w) * Math.PI * 1.35;
-    this.spin += delta;
+    const floor = this.active();
+    floor.spin += delta;
     const instant = delta / dt;
-    this.spinVel = this.spinVel * 0.2 + instant * 0.8;
-    if (this.spinVel > SPIN_MAX) this.spinVel = SPIN_MAX;
-    else if (this.spinVel < -SPIN_MAX) this.spinVel = -SPIN_MAX;
+    floor.spinVel = floor.spinVel * 0.2 + instant * 0.8;
+    if (floor.spinVel > SPIN_MAX) floor.spinVel = SPIN_MAX;
+    else if (floor.spinVel < -SPIN_MAX) floor.spinVel = -SPIN_MAX;
   }
 
   private onPointerUp(event: PointerEvent): void {
@@ -675,8 +845,10 @@ export class RingGallery {
     } catch {
       /* already released */
     }
-    if (performance.now() - this.lastDragT > 80) this.spinVel = 0;
-    if (this.moved || this.panels.length === 0) return;
+    const floor = this.active();
+    if (performance.now() - this.lastDragT > 80) floor.spinVel = 0;
+    if (this.moved) return;
+    if (this.floors.every((floor) => floor.panels.length === 0)) return;
     this.pick(event.clientX, event.clientY);
   }
 
@@ -688,10 +860,11 @@ export class RingGallery {
     const px =
       event.deltaMode === 1 ? raw * 16 : event.deltaMode === 2 ? raw * 400 : raw;
     const tick = Math.max(-40, Math.min(40, px));
-    this.spin += tick * 0.001;
-    this.spinVel += tick * 0.0018;
-    if (this.spinVel > WHEEL_MAX) this.spinVel = WHEEL_MAX;
-    else if (this.spinVel < -WHEEL_MAX) this.spinVel = -WHEEL_MAX;
+    const floor = this.active();
+    floor.spin += tick * 0.001;
+    floor.spinVel += tick * 0.0018;
+    if (floor.spinVel > WHEEL_MAX) floor.spinVel = WHEEL_MAX;
+    else if (floor.spinVel < -WHEEL_MAX) floor.spinVel = -WHEEL_MAX;
   }
 
   private pick(clientX: number, clientY: number): void {
@@ -703,22 +876,47 @@ export class RingGallery {
     this.camera.updateProjectionMatrix();
     try {
       this.raycaster.setFromCamera(this.pointer, this.camera);
-      const hits = this.raycaster.intersectObjects(
-        this.panels.map((p) => p.mesh),
-        false,
-      );
+      const meshes = this.floors.flatMap((floor) => floor.panels.map((p) => p.mesh));
+      const hits = this.raycaster.intersectObjects(meshes, false);
       const hit = hits[0];
       if (!hit) {
         if (this.selectedIndex >= 0) this.choose(-1);
         return;
       }
-      const index = this.panels.findIndex((p) => p.mesh === hit.object);
-      if (index < 0) return;
-      this.choose(index === this.selectedIndex ? -1 : index);
+      for (let r = 0; r < this.floors.length; r++) {
+        const index = this.floors[r].panels.findIndex((p) => p.mesh === hit.object);
+        if (index < 0) continue;
+        const same = r === this.activeRing && index === this.selectedIndex;
+        this.choose(same ? -1 : index, r);
+        return;
+      }
     } finally {
       this.fisheye.applyCameraCoverage(this.camera);
     }
   }
+}
+
+function initialRings(options: GalleryOptions): GalleryItem[][] {
+  if (options.rings && options.rings.length > 0) {
+    const fromRings = options.rings.slice(0, MAX_RINGS).map((items) => items.slice(0, MAX_ITEMS));
+    if (options.items?.length && fromRings[0].length === 0) {
+      fromRings[0] = options.items.slice(0, MAX_ITEMS);
+    }
+    return fromRings;
+  }
+  return [options.items?.slice(0, MAX_ITEMS) ?? []];
+}
+
+function normalizeRings(rings: GalleryItem[][] | undefined): GalleryItem[][] {
+  const next = (rings ?? [])
+    .slice(0, MAX_RINGS)
+    .map((items) => (items ?? []).slice(0, MAX_ITEMS));
+  return next.length > 0 ? next : [[]];
+}
+
+function clampRing(index: number, count: number): number {
+  if (count <= 0) return 0;
+  return Math.max(0, Math.min(count - 1, index));
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -730,6 +928,12 @@ function isTypingTarget(target: EventTarget | null): boolean {
     tag === "SELECT" ||
     target.isContentEditable
   );
+}
+
+function isActivateTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return tag === "BUTTON" || tag === "A" || tag === "SUMMARY";
 }
 
 function safeZoom(zoom: number): number {
@@ -748,7 +952,13 @@ function pickSettings(options: GalleryOptions): Partial<GallerySettings> {
   const patch: Partial<GallerySettings> = {};
   if (options.ratio != null) patch.ratio = options.ratio;
   if (options.distribution != null) patch.distribution = options.distribution;
-  if (options.background != null) patch.background = options.background;
+  if (options.backgrounds != null || options.background != null) {
+    const fill =
+      options.background != null
+        ? Array.from({ length: MAX_RINGS }, () => options.background as string)
+        : undefined;
+    patch.backgrounds = padBackgrounds(options.backgrounds, fill);
+  }
   if (options.distortion != null) patch.distortion = options.distortion;
   if (options.chromaticAberration != null) {
     patch.chromaticAberration = options.chromaticAberration;

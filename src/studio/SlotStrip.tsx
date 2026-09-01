@@ -10,18 +10,27 @@ export type Slot = {
 type SlotStripProps = {
   slots: Slot[];
   selectedIndex: number;
+  activeRing: number;
+  ringCount: number;
   onSelect: (index: number) => void;
 };
 
-export function SlotStrip({ slots, selectedIndex, onSelect }: SlotStripProps) {
+export function SlotStrip({
+  slots,
+  selectedIndex,
+  activeRing,
+  ringCount,
+  onSelect,
+}: SlotStripProps) {
+  const ringLabel = ringCount > 1 ? `Ring ${activeRing + 1} · ` : "";
   return (
     <div className="slot-strip">
       <div className="slot-strip__label">
         {slots.length === 0
-          ? "No frames"
+          ? `${ringLabel}No frames`
           : selectedIndex >= 0
-            ? `Frame ${selectedIndex + 1} / ${slots.length}`
-            : `${slots.length} frames`}
+            ? `${ringLabel}Frame ${selectedIndex + 1} / ${slots.length}`
+            : `${ringLabel}${slots.length} frames`}
       </div>
       <div className="slot-strip__row">
         {slots.map((slot, index) => (

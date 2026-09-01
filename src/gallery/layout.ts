@@ -23,6 +23,16 @@ export function ringRadius(count: number, ratio: Ratio): number {
   return Math.max(MIN_RADIUS, (count * pitch) / (Math.PI * 2));
 }
 
+const FLOOR_GAP = 0.45;
+
+export function floorPitch(ratio: Ratio): number {
+  return itemSize(ratio).height + FLOOR_GAP;
+}
+
+export function floorY(index: number, ratio: Ratio): number {
+  return index * floorPitch(ratio);
+}
+
 /** Center angle of each slot, 0 = in front of the camera (−Z). Always faces a panel, not a gap. */
 export function slotAngles(
   count: number,
