@@ -1,0 +1,75 @@
+export const RATIOS = ["landscape", "square", "portrait"] as const;
+export type Ratio = (typeof RATIOS)[number];
+
+export const RATIO_LABELS: Record<Ratio, string> = {
+  landscape: "16:9",
+  square: "1:1",
+  portrait: "9:16",
+};
+
+export const RATIO_VALUE: Record<Ratio, number> = {
+  landscape: 16 / 9,
+  square: 1,
+  portrait: 9 / 16,
+};
+
+export const MAX_ITEMS = 24;
+
+export type MediaKind = "image" | "video" | "gif";
+
+export type GalleryItem = {
+  src: string;
+  kind?: MediaKind;
+};
+
+export const DISTRIBUTIONS = ["cluster", "ring"] as const;
+export type Distribution = (typeof DISTRIBUTIONS)[number];
+
+export const DISTRIBUTION_LABELS: Record<Distribution, string> = {
+  cluster: "Close",
+  ring: "Ring",
+};
+
+export type GallerySettings = {
+  ratio: Ratio;
+  /** cluster = packed arc; ring = even around 360°. */
+  distribution: Distribution;
+  background: string;
+  distortion: number;
+  chromaticAberration: number;
+  /** 1 = default. Higher pushes the distortion crop off the viewport. */
+  overscan: number;
+  /** 1 = default FOV. Lower pulls the camera back (wider). Ring / unfocused. */
+  cameraZoom: number;
+  /** Same scale as cameraZoom. Applied when a panel is focused. */
+  focusZoom: number;
+  /** 0 = longer coast, 1 = stops quickly. Ease-out slowdown to a full stop. */
+  spinFriction: number;
+  cornerRadius: number;
+  /** Degrees. 0 is upright; positive drops the front of the ring. */
+  axisTilt: number;
+  /** Degrees. 0 is upright; positive rolls the ring clockwise. */
+  ringTilt: number;
+};
+
+export const DEFAULT_SETTINGS: GallerySettings = {
+  ratio: "portrait",
+  distribution: "ring",
+  background: "#8f8f8f",
+  distortion: 0.15,
+  chromaticAberration: 0.002,
+  overscan: 1.75,
+  cameraZoom: 0.83,
+  focusZoom: 0.65,
+  spinFriction: 0.15,
+  cornerRadius: 0.04,
+  axisTilt: -5,
+  ringTilt: -13,
+};
+
+export type GalleryOptions = Partial<GallerySettings> & {
+  items?: GalleryItem[];
+  selectedIndex?: number;
+  preview?: boolean;
+  onSelect?: (index: number) => void;
+};
