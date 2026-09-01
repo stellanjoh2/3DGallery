@@ -56,5 +56,4 @@ export function bendExisting(
   }
 
   pos.needsUpdate = true;
-  geo.computeVertexNormals();
 }

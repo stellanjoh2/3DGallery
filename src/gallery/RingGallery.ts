@@ -102,7 +102,7 @@ export class RingGallery {
     this.camera = new PerspectiveCamera(BASE_FOV, 1, 0.08, 80);
 
     this.renderer = new WebGLRenderer({
-      antialias: true,
+      antialias: false,
       alpha: false,
       powerPreference: "high-performance",
     });
@@ -121,6 +121,7 @@ export class RingGallery {
     this.fisheye.setBackground(this.bg.r, this.bg.g, this.bg.b);
     this.fisheye.setChroma(this.settings.chromaticAberration);
     this.fisheye.setOverscan(this.settings.overscan);
+    this.syncFisheyeCoverage();
     this.applyView();
     this.applyCamera();
 
@@ -180,6 +181,7 @@ export class RingGallery {
     }
     if (patch.chromaticAberration != null) this.fisheye.setChroma(patch.chromaticAberration);
     if (patch.overscan != null) this.fisheye.setOverscan(patch.overscan);
+    this.syncFisheyeCoverage();
     this.applyView();
 
     if (ratioChanged) {
@@ -340,9 +342,9 @@ export class RingGallery {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.renderer.setPixelRatio(dpr);
     this.renderer.setSize(w, h, false);
-    this.camera.aspect = w / h;
+    this.fisheye.setOutputSize(Math.round(w * dpr), Math.round(h * dpr));
+    this.syncFisheyeCoverage();
     this.applyView();
-    this.fisheye.setSize(Math.round(w * dpr), Math.round(h * dpr));
   }
 
   private loop(now: number): void {
@@ -394,10 +396,17 @@ export class RingGallery {
     const primary = safeZoom(this.settings.cameraZoom);
     const focused = safeZoom(this.settings.focusZoom);
     this.camera.fov = BASE_FOV / (primary + (focused - primary) * t);
-    this.camera.updateProjectionMatrix();
-
     this.fisheye.setStrength(this.settings.distortion * (1 - t));
     this.fisheye.setChroma(this.settings.chromaticAberration * (1 - t));
+    this.fisheye.applyCameraCoverage(this.camera);
+  }
+
+  private syncFisheyeCoverage(): void {
+    this.fisheye.setCoverage(
+      this.settings.distortion,
+      this.settings.overscan,
+      this.settings.chromaticAberration,
+    );
   }
 
   private applyCamera(): void {
@@ -466,6 +475,7 @@ export class RingGallery {
     const w = Math.max(1, this.el.clientWidth);
     const h = Math.max(1, this.el.clientHeight);
     const overscan = Math.max(this.settings.overscan, 0.05);
+    const span = this.fisheye.coverageSpan();
 
     let minX = Infinity;
     let minY = Infinity;
@@ -476,8 +486,8 @@ export class RingGallery {
       this.ndc.fromBufferAttribute(pos, i);
       panel.mesh.localToWorld(this.ndc);
       this.ndc.project(this.camera);
-      const sx = (0.5 + this.ndc.x * 0.5 * overscan) * w;
-      const sy = (0.5 - this.ndc.y * 0.5 * overscan) * h;
+      const sx = (0.5 + this.ndc.x * 0.5 * overscan * span.x) * w;
+      const sy = (0.5 - this.ndc.y * 0.5 * overscan * span.y) * h;
       minX = Math.min(minX, sx);
       maxX = Math.max(maxX, sx);
       minY = Math.min(minY, sy);
@@ -688,19 +698,26 @@ export class RingGallery {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
-    this.raycaster.setFromCamera(this.pointer, this.camera);
-    const hits = this.raycaster.intersectObjects(
-      this.panels.map((p) => p.mesh),
-      false,
-    );
-    const hit = hits[0];
-    if (!hit) {
-      if (this.selectedIndex >= 0) this.choose(-1);
-      return;
+    this.camera.clearViewOffset();
+    this.camera.aspect = Math.max(1, rect.width) / Math.max(1, rect.height);
+    this.camera.updateProjectionMatrix();
+    try {
+      this.raycaster.setFromCamera(this.pointer, this.camera);
+      const hits = this.raycaster.intersectObjects(
+        this.panels.map((p) => p.mesh),
+        false,
+      );
+      const hit = hits[0];
+      if (!hit) {
+        if (this.selectedIndex >= 0) this.choose(-1);
+        return;
+      }
+      const index = this.panels.findIndex((p) => p.mesh === hit.object);
+      if (index < 0) return;
+      this.choose(index === this.selectedIndex ? -1 : index);
+    } finally {
+      this.fisheye.applyCameraCoverage(this.camera);
     }
-    const index = this.panels.findIndex((p) => p.mesh === hit.object);
-    if (index < 0) return;
-    this.choose(index === this.selectedIndex ? -1 : index);
   }
 }
 
