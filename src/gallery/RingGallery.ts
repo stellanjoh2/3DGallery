@@ -41,6 +41,8 @@ const AUTO_SPEEDS = [0.04, 0.08, 0.14, 0.24, 0.38, 0.55, 0.75, 1.0];
 const ZOOM_IN = 0.8;
 const ZOOM_OUT = 0.64;
 const MOTION_EASE = "power2.inOut";
+const AXIS_LOCK = 10;
+const FLOOR_DRAG = 72;
 
 type Panel = {
   group: Group;
@@ -95,7 +97,12 @@ export class RingGallery {
   private zoomPos = new Vector3();
   private dragging = false;
   private moved = false;
+  private dragAxis: "x" | "y" | null = null;
   private lastX = 0;
+  private lastY = 0;
+  private dragStartX = 0;
+  private dragStartY = 0;
+  private dragY = 0;
   private lastDragT = 0;
   private lastT = 0;
   private raf = 0;
@@ -810,7 +817,12 @@ export class RingGallery {
   private onPointerDown(event: PointerEvent): void {
     this.dragging = true;
     this.moved = false;
+    this.dragAxis = null;
+    this.dragY = 0;
     this.lastX = event.clientX;
+    this.lastY = event.clientY;
+    this.dragStartX = event.clientX;
+    this.dragStartY = event.clientY;
     this.lastDragT = performance.now();
     this.active().spinVel = 0;
     this.releaseSpin();
@@ -822,11 +834,26 @@ export class RingGallery {
     const now = performance.now();
     const dt = Math.max(0.001, (now - this.lastDragT) / 1000);
     const dx = event.clientX - this.lastX;
-    if (Math.abs(dx) > 3) this.moved = true;
+    let dy = event.clientY - this.lastY;
     this.lastX = event.clientX;
+    this.lastY = event.clientY;
     this.lastDragT = now;
-    if (!this.moved) return;
+
+    if (!this.dragAxis) {
+      const fromX = event.clientX - this.dragStartX;
+      const fromY = event.clientY - this.dragStartY;
+      if (Math.abs(fromX) < AXIS_LOCK && Math.abs(fromY) < AXIS_LOCK) return;
+      this.dragAxis =
+        this.floors.length > 1 && Math.abs(fromY) > Math.abs(fromX) ? "y" : "x";
+      dy = fromY;
+    }
+    this.moved = true;
     if (this.selectedIndex >= 0) this.choose(-1);
+    if (this.dragAxis === "y") {
+      this.dragFloors(dy);
+      return;
+    }
+
     const w = Math.max(1, this.el.clientWidth);
     const delta = (dx / w) * Math.PI * 1.35;
     const floor = this.active();
@@ -835,6 +862,20 @@ export class RingGallery {
     floor.spinVel = floor.spinVel * 0.2 + instant * 0.8;
     if (floor.spinVel > SPIN_MAX) floor.spinVel = SPIN_MAX;
     else if (floor.spinVel < -SPIN_MAX) floor.spinVel = -SPIN_MAX;
+  }
+
+  private dragFloors(dy: number): void {
+    this.dragY += dy;
+    const top = this.floors.length - 1;
+    if (this.activeRing >= top && this.dragY > 0) this.dragY = 0;
+    if (this.activeRing <= 0 && this.dragY < 0) this.dragY = 0;
+    if (this.dragY <= -FLOOR_DRAG) {
+      this.choose(-1, this.activeRing - 1);
+      this.dragY = 0;
+    } else if (this.dragY >= FLOOR_DRAG) {
+      this.choose(-1, this.activeRing + 1);
+      this.dragY = 0;
+    }
   }
 
   private onPointerUp(event: PointerEvent): void {

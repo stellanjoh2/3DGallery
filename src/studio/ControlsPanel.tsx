@@ -182,7 +182,7 @@ export function ControlsPanel({
           {ringCount > 1 ? (
             <>
               <p className="panel-hint">
-                Keys 1, 2, 3 move the camera. Click a frame on another floor to ride up.
+                Drag up or down to change floors. Keys 1, 2, 3 also work. Click a frame on another floor to ride there.
               </p>
               <div
                 className={
