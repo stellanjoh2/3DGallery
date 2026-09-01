@@ -17,7 +17,7 @@
   --settings-inner-gap: 10px;
   --settings-row-gap: 28px;
   --ui-panel-width: 400px;
-  --ui-ease: cubic-bezier(0.65, 0, 0.35, 1);
+  --ui-ease: cubic-bezier(0.65, 0, 0.16, 1);
   color-scheme: dark;
 }
 

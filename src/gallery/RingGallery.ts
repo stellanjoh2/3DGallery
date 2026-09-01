@@ -1,4 +1,5 @@
 import gsap from "gsap";
+import { CustomEase } from "gsap/CustomEase";
 import {
   Color,
   Group,
@@ -34,17 +35,29 @@ const HOME_Y = 0.04;
 const BASE_FOV = 72;
 /** Slight extra zoom so the panel reaches the viewport edges through AA. */
 const FILL = 1.02;
-const SPIN_MAX = 4.2;
 const WHEEL_MAX = 0.72;
 /** rad/s. Index 0 = speed 1 (very slow). Last is brisk, not a blur. */
 const AUTO_SPEEDS = [0.04, 0.08, 0.14, 0.24, 0.38, 0.55, 0.75, 1.0];
-const ZOOM_IN = 0.8;
-const ZOOM_OUT = 0.64;
-const MOTION_EASE = "power2.inOut";
-/** easings.net easeInOutQuart — select / zoom in and out. */
-const FOCUS_EASE = "quart.inOut";
+const ZOOM_IN = 1.2;
+const ZOOM_OUT = 0.96;
+
+gsap.registerPlugin(CustomEase);
+
+/**
+ * easings.net easeInOutCubic (0.65, 0, 0.35, 1) with the out-handle
+ * pulled in so the last stretch of motion occupies extra time.
+ */
+const MOTION_EASE = CustomEase.create("galleryMotion", "0.65,0,0.16,1");
+/** Same cubic in, even longer settle — fullscreen zoom in / out. */
+const FOCUS_EASE = CustomEase.create("galleryFocus", "0.58,0,0.08,1");
 const AXIS_LOCK = 10;
 const FLOOR_DRAG = 72;
+const SWIPE = 56;
+const SWIPE_FLICK = 520;
+/** rad/s while an arrow key is held zoomed out — same as auto-rotate speed 7. */
+const KEY_SPIN = 0.75;
+/** Delay before a held arrow becomes a constant spin instead of a single step. */
+const KEY_HOLD = 0.28;
 
 type Panel = {
   group: Group;
@@ -89,6 +102,8 @@ export class RingGallery {
   private autoRotate = false;
   private autoSpeed = 1;
   private aligning = false;
+  private keySpin = 0;
+  private keyHoldTimer = 0;
   private focusT = 0;
   private floorY = 0;
   private focusPoint = new Vector3(0, 0, -3.3);
@@ -105,6 +120,10 @@ export class RingGallery {
   private dragStartX = 0;
   private dragStartY = 0;
   private dragY = 0;
+  private dragFromFocus = false;
+  private dragCommitted = false;
+  private pendingFloor = -1;
+  private dragVx = 0;
   private lastDragT = 0;
   private lastT = 0;
   private raf = 0;
@@ -157,6 +176,8 @@ export class RingGallery {
     this.onPointerUp = this.onPointerUp.bind(this);
     this.onWheel = this.onWheel.bind(this);
     this.onKeyDown = this.onKeyDown.bind(this);
+    this.onKeyUp = this.onKeyUp.bind(this);
+    this.onBlur = this.onBlur.bind(this);
     this.loop = this.loop.bind(this);
 
     const canvas = this.renderer.domElement;
@@ -165,6 +186,8 @@ export class RingGallery {
     window.addEventListener("pointerup", this.onPointerUp);
     canvas.addEventListener("wheel", this.onWheel, { passive: false });
     window.addEventListener("keydown", this.onKeyDown);
+    window.addEventListener("keyup", this.onKeyUp);
+    window.addEventListener("blur", this.onBlur);
 
     this.ro = new ResizeObserver(() => this.resize());
     this.ro.observe(el);
@@ -267,6 +290,9 @@ export class RingGallery {
     window.removeEventListener("pointerup", this.onPointerUp);
     canvas.removeEventListener("wheel", this.onWheel);
     window.removeEventListener("keydown", this.onKeyDown);
+    window.removeEventListener("keyup", this.onKeyUp);
+    window.removeEventListener("blur", this.onBlur);
+    this.clearKeyHold();
     this.clearFloors();
     this.fisheye.dispose();
     this.renderer.dispose();
@@ -318,6 +344,7 @@ export class RingGallery {
 
   private goToFloor(index: number): void {
     if (index < 0 || index >= this.floors.length) return;
+    this.releaseSpin();
     this.activeRing = index;
     const duration = this.motionDuration(ZOOM_IN);
     gsap.to(this, {
@@ -511,14 +538,18 @@ export class RingGallery {
   private spinFloor(floor: Floor, index: number, dt: number): void {
     const dir = index % 2 === 0 ? 1 : -1;
     const isActive = index === this.activeRing;
-    const dragging = this.dragging && isActive;
+    const grabbing = this.dragging && isActive && this.dragAxis === "x";
     const focused = this.selectedIndex >= 0 && isActive;
-    const autoSpin = this.autoRotate && !dragging && !focused;
+    const cruising = isActive && this.keySpin !== 0 && !focused && !grabbing;
+    const autoSpin = this.autoRotate && !grabbing && !focused && !cruising;
 
-    if (autoSpin) {
+    if (cruising) {
+      floor.spin += KEY_SPIN * dt * this.keySpin;
+      floor.spinVel = 0;
+    } else if (autoSpin) {
       floor.spin += AUTO_SPEEDS[this.autoSpeed - 1] * dt * dir;
       floor.spinVel = 0;
-    } else if (!dragging && !(this.aligning && isActive)) {
+    } else if (!grabbing && !(this.aligning && isActive)) {
       floor.spin += floor.spinVel * dt;
       const speed = Math.abs(floor.spinVel);
       if (speed > 0) {
@@ -637,6 +668,7 @@ export class RingGallery {
   }
 
   private focusIndex(index: number): void {
+    this.pendingFloor = -1;
     this.faceIndex(index, true);
     this.applyFocusPresentation();
   }
@@ -653,7 +685,7 @@ export class RingGallery {
     gsap.killTweensOf(floor, "spin");
     gsap.killTweensOf(this.stepBlend);
 
-    if (!focus && this.autoRotate && duration > 0) {
+    if (!focus && this.autoRotate && duration > 0 && !this.dragging) {
       const dir = this.activeRing % 2 === 0 ? 1 : -1;
       const cruise = AUTO_SPEEDS[this.autoSpeed - 1] * dir;
       const extra = facing - floor.spin - cruise * duration;
@@ -702,8 +734,22 @@ export class RingGallery {
       duration: this.motionDuration(ZOOM_OUT),
       ease: FOCUS_EASE,
       overwrite: "auto",
+      onComplete: () => this.flushPendingFloor(),
     });
     this.applyFocusPresentation();
+  }
+
+  private queueFloor(index: number): void {
+    if (index < 0 || index >= this.floors.length || index === this.activeRing) return;
+    this.pendingFloor = index;
+    if (this.focusT <= 0.001) this.flushPendingFloor();
+  }
+
+  private flushPendingFloor(): void {
+    const next = this.pendingFloor;
+    this.pendingFloor = -1;
+    if (next < 0 || next === this.activeRing || this.selectedIndex >= 0) return;
+    this.choose(-1, next);
   }
 
   private choose(index: number, ring = this.activeRing): void {
@@ -742,6 +788,76 @@ export class RingGallery {
     const current = this.currentItem();
     if (current < 0) return;
     this.faceIndex((current + delta + n) % n, false);
+  }
+
+  /** stepDir = index step; spinDir = constant spin sign (left is −1). */
+  private handleSpinKey(stepDir: number, spinDir: number, repeat: boolean): void {
+    if (this.keySpin !== 0) {
+      this.keySpin = spinDir;
+      return;
+    }
+    if (repeat) {
+      this.startKeySpin(spinDir);
+      return;
+    }
+    this.step(stepDir);
+    this.armKeySpin(spinDir);
+  }
+
+  private armKeySpin(spinDir: number): void {
+    this.clearKeyHold();
+    this.keyHoldTimer = window.setTimeout(() => this.startKeySpin(spinDir), KEY_HOLD * 1000);
+  }
+
+  private clearKeyHold(): void {
+    if (!this.keyHoldTimer) return;
+    window.clearTimeout(this.keyHoldTimer);
+    this.keyHoldTimer = 0;
+  }
+
+  private startKeySpin(spinDir: number): void {
+    this.clearKeyHold();
+    if (this.selectedIndex >= 0) return;
+    if (this.active().panels.length <= 1) return;
+    this.releaseSpin();
+    this.keySpin = spinDir;
+  }
+
+  private stopKeySpin(): void {
+    this.clearKeyHold();
+    if (this.keySpin === 0) return;
+    const dir = this.keySpin;
+    this.keySpin = 0;
+    if (this.selectedIndex >= 0) return;
+    const index = this.aheadIndex(dir);
+    if (index >= 0) this.faceIndex(index, false);
+  }
+
+  /** Panel we'd hit next if we keep spinning in `spinDir`. */
+  private aheadIndex(spinDir: number): number {
+    const floor = this.active();
+    const n = floor.panels.length;
+    if (n === 0) return -1;
+    let best = 0;
+    let bestTravel = Infinity;
+    for (let i = 0; i < n; i++) {
+      let travel = shortestSpin(floor.spin, -floor.panels[i].angle) - floor.spin;
+      if (spinDir < 0) travel = -travel;
+      if (travel < -1e-4) travel += Math.PI * 2;
+      if (travel < bestTravel) {
+        bestTravel = travel;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  private onKeyUp(event: KeyboardEvent): void {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") this.stopKeySpin();
+  }
+
+  private onBlur(): void {
+    this.stopKeySpin();
   }
 
   private onKeyDown(event: KeyboardEvent): void {
@@ -784,13 +900,19 @@ export class RingGallery {
         break;
       case "ArrowLeft":
         event.preventDefault();
-        if (this.selectedIndex >= 0) this.choose(-1);
-        else this.step(1);
+        if (this.selectedIndex >= 0) {
+          if (!event.repeat) this.choose(-1);
+        } else {
+          this.handleSpinKey(1, -1, event.repeat);
+        }
         break;
       case "ArrowRight":
         event.preventDefault();
-        if (this.selectedIndex >= 0) this.choose(-1);
-        else this.step(-1);
+        if (this.selectedIndex >= 0) {
+          if (!event.repeat) this.choose(-1);
+        } else {
+          this.handleSpinKey(-1, 1, event.repeat);
+        }
         break;
     }
   }
@@ -821,13 +943,15 @@ export class RingGallery {
     this.moved = false;
     this.dragAxis = null;
     this.dragY = 0;
+    this.dragVx = 0;
+    this.dragFromFocus = this.selectedIndex >= 0;
+    this.dragCommitted = false;
     this.lastX = event.clientX;
     this.lastY = event.clientY;
     this.dragStartX = event.clientX;
     this.dragStartY = event.clientY;
     this.lastDragT = performance.now();
     this.active().spinVel = 0;
-    this.releaseSpin();
     this.renderer.domElement.setPointerCapture(event.pointerId);
   }
 
@@ -840,6 +964,7 @@ export class RingGallery {
     this.lastX = event.clientX;
     this.lastY = event.clientY;
     this.lastDragT = now;
+    this.dragVx = dx / dt;
 
     if (!this.dragAxis) {
       const fromX = event.clientX - this.dragStartX;
@@ -851,19 +976,31 @@ export class RingGallery {
     }
     this.moved = true;
     if (this.selectedIndex >= 0) this.choose(-1);
-    if (this.dragAxis === "y") {
-      this.dragFloors(dy);
+    if (this.dragFromFocus) {
+      if (this.dragAxis === "y") this.commitFocusFloor(event.clientY - this.dragStartY);
       return;
     }
+    if (this.dragAxis === "y") this.dragFloors(dy);
+    else this.swipeStep(event.clientX);
+  }
 
-    const w = Math.max(1, this.el.clientWidth);
-    const delta = (dx / w) * Math.PI * 1.35;
-    const floor = this.active();
-    floor.spin += delta;
-    const instant = delta / dt;
-    floor.spinVel = floor.spinVel * 0.2 + instant * 0.8;
-    if (floor.spinVel > SPIN_MAX) floor.spinVel = SPIN_MAX;
-    else if (floor.spinVel < -SPIN_MAX) floor.spinVel = -SPIN_MAX;
+  private commitFocusFloor(fromY: number): void {
+    if (this.dragCommitted) return;
+    this.dragCommitted = true;
+    this.queueFloor(this.activeRing + (fromY > 0 ? 1 : -1));
+  }
+
+  private swipeStep(clientX: number): void {
+    if (this.dragCommitted || this.dragFromFocus) return;
+    const dx = clientX - this.dragStartX;
+    const flicked =
+      performance.now() - this.lastDragT < 80 &&
+      Math.abs(this.dragVx) >= SWIPE_FLICK;
+    if (Math.abs(dx) < SWIPE && !flicked) return;
+    this.dragCommitted = true;
+    const dir =
+      Math.abs(dx) >= 8 ? (dx < 0 ? 1 : -1) : this.dragVx < 0 ? 1 : -1;
+    this.step(dir);
   }
 
   private dragFloors(dy: number): void {
@@ -888,11 +1025,17 @@ export class RingGallery {
     } catch {
       /* already released */
     }
-    const floor = this.active();
-    if (performance.now() - this.lastDragT > 80) floor.spinVel = 0;
-    if (this.moved) return;
-    if (this.floors.every((floor) => floor.panels.length === 0)) return;
-    this.pick(event.clientX, event.clientY);
+    this.active().spinVel = 0;
+    if (!this.moved) {
+      if (this.floors.every((ring) => ring.panels.length === 0)) return;
+      this.pick(event.clientX, event.clientY);
+      return;
+    }
+    if (this.dragFromFocus && this.dragAxis === "y") {
+      this.commitFocusFloor(event.clientY - this.dragStartY);
+      return;
+    }
+    if (this.dragAxis === "x") this.swipeStep(event.clientX);
   }
 
   private onWheel(event: WheelEvent): void {
