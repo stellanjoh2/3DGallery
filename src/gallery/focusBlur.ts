@@ -10,14 +10,12 @@ export type FocusPlate = {
 
 /** CSS backdrop-filter over the viewport; the focused photo sits on top. */
 export class FocusBlurOverlay {
-  private readonly host: HTMLElement;
   private readonly root: HTMLElement;
   private readonly pane: HTMLElement;
   private readonly plate: HTMLElement;
   private plateMedia: FocusPlate["source"] | null = null;
 
   constructor(host: HTMLElement) {
-    this.host = host;
     host.style.position = host.style.position || "relative";
 
     this.root = document.createElement("div");
