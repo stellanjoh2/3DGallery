@@ -539,9 +539,10 @@ export class RingGallery {
     const dir = index % 2 === 0 ? 1 : -1;
     const isActive = index === this.activeRing;
     const grabbing = this.dragging && isActive && this.dragAxis === "x";
-    const focused = this.selectedIndex >= 0 && isActive;
+    const focused = isActive && this.selectedIndex >= 0;
+    const leaving = isActive && this.focusT > 0.001;
     const cruising = isActive && this.keySpin !== 0 && !focused && !grabbing;
-    const autoSpin = this.autoRotate && !grabbing && !focused && !cruising;
+    const autoSpin = this.autoRotate && !grabbing && !focused && !leaving && !cruising;
 
     if (cruising) {
       floor.spin += KEY_SPIN * dt * this.keySpin;
@@ -549,7 +550,7 @@ export class RingGallery {
     } else if (autoSpin) {
       floor.spin += AUTO_SPEEDS[this.autoSpeed - 1] * dt * dir;
       floor.spinVel = 0;
-    } else if (!grabbing && !(this.aligning && isActive)) {
+    } else if (!grabbing && !focused && !(this.aligning && isActive)) {
       floor.spin += floor.spinVel * dt;
       const speed = Math.abs(floor.spinVel);
       if (speed > 0) {
@@ -727,7 +728,8 @@ export class RingGallery {
   }
 
   private blurFocus(): void {
-    this.aligning = false;
+    this.releaseSpin();
+    this.active().spinVel = 0;
     gsap.killTweensOf(this, "focusT");
     gsap.to(this, {
       focusT: 0,
@@ -871,7 +873,8 @@ export class RingGallery {
       if (floor >= this.floors.length) return;
       if (floor === this.activeRing && this.selectedIndex < 0) return;
       event.preventDefault();
-      this.choose(-1, floor);
+      if (this.selectedIndex >= 0) this.choose(-1);
+      this.queueFloor(floor);
       return;
     }
 
@@ -1040,8 +1043,11 @@ export class RingGallery {
 
   private onWheel(event: WheelEvent): void {
     event.preventDefault();
+    if (this.selectedIndex >= 0) {
+      this.choose(-1);
+      return;
+    }
     this.releaseSpin();
-    if (this.selectedIndex >= 0) this.choose(-1);
     const raw = event.deltaY + event.deltaX;
     const px =
       event.deltaMode === 1 ? raw * 16 : event.deltaMode === 2 ? raw * 400 : raw;
