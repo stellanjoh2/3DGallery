@@ -66,10 +66,10 @@ export type GallerySettings = {
 };
 
 export const DEFAULT_SETTINGS: GallerySettings = {
-  ratio: "portrait",
+  ratio: "landscape",
   distribution: "ring",
   backgrounds: padBackgrounds(),
-  distortion: 0.15,
+  distortion: 0.05,
   chromaticAberration: 0.002,
   overscan: 1.75,
   cameraZoom: 0.83,

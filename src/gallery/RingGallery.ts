@@ -35,7 +35,7 @@ const HOME_Y = 0.04;
 const BASE_FOV = 72;
 /** Slight extra zoom so the panel reaches the viewport edges through AA. */
 const FILL = 1.02;
-const WHEEL_MAX = 0.72;
+const WHEEL_MAX = 0.36;
 /** rad/s. Index 0 = speed 1 (very slow). Last is brisk, not a blur. */
 const AUTO_SPEEDS = [0.04, 0.08, 0.14, 0.24, 0.38, 0.55, 0.75, 1.0];
 const ZOOM_IN = 1.2;
@@ -60,6 +60,8 @@ const SWIPE_FLICK = 520;
 const KEY_SPIN = 0.75;
 /** Delay before a held arrow becomes a constant spin instead of a single step. */
 const KEY_HOLD = 0.28;
+/** Extra ignore window after zoom-out so leftover wheel ticks don't spin. */
+const WHEEL_FOCUS_LOCK = 0.25;
 
 type Panel = {
   group: Group;
@@ -127,6 +129,7 @@ export class RingGallery {
   private dragY = 0;
   private dragFromFocus = false;
   private dragCommitted = false;
+  private wheelLockUntil = 0;
   private pendingFloor = -1;
   private pendingIndex = -1;
   private dragVx = 0;
@@ -1067,8 +1070,9 @@ export class RingGallery {
       Math.abs(this.dragVx) >= SWIPE_FLICK;
     if (Math.abs(dx) < SWIPE && !flicked) return;
     this.dragCommitted = true;
+    // Finger-follow: drag left brings the right-hand item forward.
     const dir =
-      Math.abs(dx) >= 8 ? (dx < 0 ? 1 : -1) : this.dragVx < 0 ? 1 : -1;
+      Math.abs(dx) >= 8 ? (dx < 0 ? -1 : 1) : this.dragVx < 0 ? -1 : 1;
     this.step(dir);
   }
 
@@ -1114,16 +1118,19 @@ export class RingGallery {
     event.preventDefault();
     if (this.selectedIndex >= 0) {
       this.choose(-1);
+      this.wheelLockUntil =
+        performance.now() + (this.motionDuration(ZOOM_OUT) + WHEEL_FOCUS_LOCK) * 1000;
       return;
     }
+    if (this.focusT > 0.001 || performance.now() < this.wheelLockUntil) return;
     this.releaseSpin();
     const raw = event.deltaY + event.deltaX;
     const px =
       event.deltaMode === 1 ? raw * 16 : event.deltaMode === 2 ? raw * 400 : raw;
     const tick = Math.max(-40, Math.min(40, px));
     const floor = this.active();
-    floor.spin += tick * 0.001;
-    floor.spinVel += tick * 0.0018;
+    floor.spin += tick * 0.0005;
+    floor.spinVel += tick * 0.0009;
     if (floor.spinVel > WHEEL_MAX) floor.spinVel = WHEEL_MAX;
     else if (floor.spinVel < -WHEEL_MAX) floor.spinVel = -WHEEL_MAX;
   }

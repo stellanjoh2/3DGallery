@@ -1,3 +1,4 @@
+import { decompressFrames, parseGIF, type ParsedFrame } from "gifuct-js";
 import {
   CanvasTexture,
   LinearFilter,
@@ -71,6 +72,116 @@ function loadVideo(src: string): Promise<HTMLVideoElement> {
   });
 }
 
+function frameDelay(frame: ParsedFrame): number {
+  return frame.delay < 20 ? 100 : frame.delay;
+}
+
+/** Canvas/WebGL only ever see one GIF frame; play decoded patches instead. */
+async function loadGif(src: string): Promise<LoadedMedia> {
+  const res = await fetch(src);
+  if (!res.ok) throw new Error("Failed to load gif");
+  const gif = parseGIF(await res.arrayBuffer());
+  const frames = decompressFrames(gif, true).filter(
+    (frame) => frame.patch && frame.dims.width > 0 && frame.dims.height > 0,
+  );
+  if (frames.length === 0) throw new Error("Empty gif");
+
+  const width = Math.max(1, gif.lsd.width);
+  const height = Math.max(1, gif.lsd.height);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) throw new Error("No 2D context");
+  const scratch = document.createElement("canvas");
+  const scratchCtx = scratch.getContext("2d");
+  if (!scratchCtx) throw new Error("No 2D context");
+
+  let patchData: ImageData | null = null;
+  let snapshot: ImageData | null = null;
+  let pending: { type: number; x: number; y: number; w: number; h: number } | null =
+    null;
+
+  const drawPatch = (frame: ParsedFrame) => {
+    const { left, top, width: w, height: h } = frame.dims;
+    if (!patchData || patchData.width !== w || patchData.height !== h) {
+      scratch.width = w;
+      scratch.height = h;
+      patchData = scratchCtx.createImageData(w, h);
+    }
+    patchData.data.set(frame.patch);
+    scratchCtx.putImageData(patchData, 0, 0);
+    ctx.drawImage(scratch, left, top);
+  };
+
+  const paint = (frame: ParsedFrame) => {
+    if (pending) {
+      if (pending.type === 2) {
+        ctx.clearRect(pending.x, pending.y, pending.w, pending.h);
+      } else if (pending.type === 3 && snapshot) {
+        ctx.putImageData(snapshot, 0, 0);
+      }
+      pending = null;
+    }
+    if (frame.disposalType === 3) {
+      snapshot = ctx.getImageData(0, 0, width, height);
+    }
+    drawPatch(frame);
+    if (frame.disposalType === 2 || frame.disposalType === 3) {
+      pending = {
+        type: frame.disposalType,
+        x: frame.dims.left,
+        y: frame.dims.top,
+        w: frame.dims.width,
+        h: frame.dims.height,
+      };
+    }
+  };
+
+  const reset = () => {
+    ctx.clearRect(0, 0, width, height);
+    snapshot = null;
+    pending = null;
+  };
+
+  paint(frames[0]);
+  const texture = prepare(new CanvasTexture(canvas));
+  const applyFit = makeFit(texture, canvas, width / height);
+  const dispose = () => texture.dispose();
+
+  if (frames.length === 1) {
+    return { texture, tick: null, dispose, applyFit };
+  }
+
+  let index = 0;
+  let last = performance.now();
+  let elapsed = 0;
+
+  return {
+    texture,
+    tick: () => {
+      const now = performance.now();
+      elapsed += now - last;
+      last = now;
+      let painted = false;
+      let steps = 0;
+      for (; steps < 8; steps++) {
+        const delay = frameDelay(frames[index]);
+        if (elapsed < delay) break;
+        elapsed -= delay;
+        index = (index + 1) % frames.length;
+        if (index === 0) reset();
+        paint(frames[index]);
+        painted = true;
+      }
+      if (steps === 8) elapsed = 0;
+      if (painted) texture.needsUpdate = true;
+    },
+    dispose,
+    applyFit,
+  };
+}
+
 export async function loadMedia(
   src: string,
   kind: MediaKind,
@@ -98,31 +209,16 @@ export async function loadMedia(
     };
   }
 
+  if (kind === "gif") {
+    try {
+      return await loadGif(src);
+    } catch {
+      /* show the first frame if decoding fails */
+    }
+  }
+
   const img = await loadImage(src);
   const aspect = img.naturalWidth / Math.max(1, img.naturalHeight);
-
-  if (kind === "gif") {
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.max(1, img.naturalWidth);
-    canvas.height = Math.max(1, img.naturalHeight);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("No 2D context");
-    const texture = prepare(new CanvasTexture(canvas));
-    const applyFit = makeFit(texture, img, aspect);
-    return {
-      texture,
-      tick: () => {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0);
-        texture.needsUpdate = true;
-      },
-      dispose: () => {
-        img.src = "";
-        texture.dispose();
-      },
-      applyFit,
-    };
-  }
 
   const texture = prepare(new Texture(img));
   return {

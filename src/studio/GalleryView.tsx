@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { RingGallery } from "../gallery/RingGallery";
 import type { GalleryItem, GallerySettings } from "../types";
 
@@ -22,23 +22,35 @@ export function GalleryView({
   const hostRef = useRef<HTMLDivElement>(null);
   const galleryRef = useRef<RingGallery | null>(null);
   const onSelectRef = useRef(onSelect);
+  const [webglError, setWebglError] = useState(false);
   onSelectRef.current = onSelect;
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const gallery = new RingGallery(host, {
-      ...settings,
-      rings,
-      selectedIndex,
-      selectedRing: activeRing,
-      preview,
-      onSelect: (index, ring) => onSelectRef.current(index, ring),
-    });
+    let gallery: RingGallery;
+    try {
+      gallery = new RingGallery(host, {
+        ...settings,
+        rings,
+        selectedIndex,
+        selectedRing: activeRing,
+        preview,
+        onSelect: (index, ring) => onSelectRef.current(index, ring),
+      });
+    } catch {
+      setWebglError(true);
+      return;
+    }
     galleryRef.current = gallery;
     return () => {
-      gallery.destroy();
-      galleryRef.current = null;
+      const instance = gallery;
+      // Defer so React Strict Mode can remount before this context is lost.
+      // Destroying in the cleanup itself makes Chrome block the next WebGL context.
+      window.setTimeout(() => {
+        instance.destroy();
+        if (galleryRef.current === instance) galleryRef.current = null;
+      }, 0);
     };
     // Mount once. Updates go through the instance API.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -64,5 +76,11 @@ export function GalleryView({
     galleryRef.current?.setPreview(preview);
   }, [preview]);
 
-  return <div ref={hostRef} className="gallery-host" />;
+  return (
+    <div ref={hostRef} className="gallery-host">
+      {webglError ? (
+        <p className="empty-hint">WebGL was blocked. Reload this tab.</p>
+      ) : null}
+    </div>
+  );
 }

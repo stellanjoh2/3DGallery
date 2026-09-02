@@ -21,10 +21,10 @@ npm run build:lib
 import { mountGallery } from "ring-gallery";
 
 const { destroy } = mountGallery("#gallery", {
-  ratio: "portrait", // "landscape" | "square"
+  ratio: "landscape", // "square" | "portrait"
   distribution: "ring", // "cluster"
   background: "#8f8f8f", // or `backgrounds: ["#8f8f8f", "#1c3a2a", "#0a2a44"]` per ring
-  distortion: 0.15,
+  distortion: 0.05,
   chromaticAberration: 0.002,
   overscan: 1.75,
   cameraZoom: 0.83,
